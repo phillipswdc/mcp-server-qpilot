@@ -1,0 +1,98 @@
+# --- Secrets and runtime state -----------------------------------------------
+.env
+.env.local
+.env.*.local
+
+# --- Node --------------------------------------------------------------------
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm
+.eslintcache
+.node_repl_history
+*.tgz
+
+# --- Build / coverage --------------------------------------------------------
+dist/
+build/
+out/
+coverage/
+.nyc_output/
+
+# --- Local data (per-site SQLite audit + cache) ------------------------------
+data/
+exports/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-journal
+
+# --- Logs --------------------------------------------------------------------
+*.log
+logs/
+
+# --- macOS -------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.Spotlight-V100
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# --- Windows -----------------------------------------------------------------
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.stackdump
+*.lnk
+
+# --- Linux -------------------------------------------------------------------
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# --- JetBrains IDEs ----------------------------------------------------------
+.idea/
+*.iml
+*.iws
+*.ipr
+.idea_modules/
+
+# --- VS Code -----------------------------------------------------------------
+.vscode/
+*.code-workspace
+.history/
+
+# --- Sublime Text ------------------------------------------------------------
+*.sublime-project
+*.sublime-workspace
+
+# --- Vim / Emacs / Nano ------------------------------------------------------
+*.swp
+*.swo
+*.swn
+*~
+\#*\#
+.\#*
+*.bak
+
+# --- Local scratch / tool state ----------------------------------------------
+.cache/
+tmp/
+.tmp/

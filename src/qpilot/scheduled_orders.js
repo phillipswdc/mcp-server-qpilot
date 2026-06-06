@@ -1,0 +1,433 @@
+/**
+ * Scheduled Orders domain module.
+ *
+ * Reads (no audit): getById, search (lightweight v3), getHistory.
+ * Mutations:
+ *   - update: full PUT — audited + rollback supported.
+ *   - changeStatus: targeted status flip — audited + rollback supported.
+ *   - deleteSoft: QPilot soft-deletes scheduled orders, recoverable from
+ *     QPilot itself. Per project rule we skip the audit/rollback layer and
+ *     just call the API.
+ *
+ * Both audited mutations record `operation: "update"` because they ultimately
+ * change fields on the same record. The rollback handler dispatches by
+ * `tool_name` so it can route a body-based revert vs. a status-path revert
+ * to the right call shape.
+ */
+import { qpilotRequest, sitePath } from "./client.js";
+import { withRetry } from "./retry.js";
+import { auditedMutation } from "./_audit.js";
+import { registerRollbackHandler } from "./audit.js";
+import { env } from "../config/env.js";
+import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from "../config/constants.js";
+
+const OBJECT_TYPE = "scheduled_orders";
+
+/**
+ * Properties captured on status-change audits. Keeps audit rows compact
+ * while still letting rollback recover the prior status from old_values.
+ */
+const STATUS_AUDIT_KEYS = ["id", "status", "isActive"];
+
+/**
+ * Fetch a single scheduled order by id.
+ * @param {string|number} id
+ * @returns {Promise<object>}
+ */
+export async function getScheduledOrderById(id) {
+  return await withRetry(() =>
+    qpilotRequest({ path: orderPath(id) })
+  );
+}
+
+/**
+ * Lightweight search of scheduled orders. Uses the v3 endpoint which returns
+ * a trimmed payload suitable for list views.
+ *
+ * Parameter names match QPilot's v3 endpoint exactly — `statusNames` is an
+ * ARRAY (multiple statuses combine with OR), `search` is the free-text key,
+ * and there is no dedicated `customerId` filter (route customer lookups
+ * through `search` or via /Customers/{id} for direct fetches).
+ *
+ * @param {object} [params]
+ * @param {number} [params.page=1] 1-indexed page number
+ * @param {number} [params.pageSize] Page size (capped at MAX_PAGE_LIMIT)
+ * @param {string[]} [params.statusNames] Filter by one or more status values
+ *   (e.g. ["Active"], ["Paused","Failed"]). Sent as repeated query keys.
+ * @param {string} [params.search] Free-text search across QPilot's default
+ *   searchable fields.
+ * @param {string} [params.orderBy] Field to sort by (default "NextOccurrenceUtc")
+ * @param {"asc"|"desc"} [params.order] Sort direction (default "asc")
+ * @returns {Promise<object>}
+ */
+export async function searchScheduledOrders({
+  page = 1,
+  pageSize = DEFAULT_PAGE_LIMIT,
+  statusNames,
+  search,
+  orderBy,
+  order,
+} = {}) {
+  const cappedSize = Math.min(pageSize, MAX_PAGE_LIMIT);
+  return await withRetry(() =>
+    qpilotRequest({
+      // The v3 endpoint sits at /v3/Sites/{siteId}/ScheduledOrders rather
+      // than under sitePath()'s /Sites/{siteId} prefix.
+      path: `/v3/Sites/${encodeURIComponent(env.siteId)}/ScheduledOrders`,
+      query: {
+        page,
+        pageSize: cappedSize,
+        statusNames,
+        search,
+        orderBy,
+        order,
+      },
+    })
+  );
+}
+
+/**
+ * Fetch the QPilot-recorded change history for scheduled orders. This is
+ * QPilot's own activity log — distinct from this server's local audit_log.
+ *
+ * Per QPilot docs the endpoint accepts only date-range, pagination, and
+ * order parameters — there is NO server-side filter for a single order id.
+ * To get one order's history, fetch a date range with `cache: true` and
+ * then `query_cache(filter: scheduledOrderId EQ <id>)`.
+ *
+ * Date coercion: a bare date like "2026-05-05" passed to QPilot is
+ * interpreted as 00:00:00Z, so an `endDate` bare date excludes anything
+ * later that same day. We coerce a bare-date `endDate` to the end of that
+ * day (T23:59:59.999Z) so the docstring's "inclusive upper bound" promise
+ * actually holds. `startDate` is already inclusive at 00:00:00 with a bare
+ * date, so we leave it alone.
+ *
+ * @param {object} [params]
+ * @param {string} [params.startDate] ISO date (inclusive lower bound)
+ * @param {string} [params.endDate] ISO date (inclusive upper bound — see coercion above)
+ * @param {number} [params.page=1]
+ * @param {number} [params.pageSize]
+ * @param {string} [params.orderBy="Id"] Field to sort by
+ * @param {"asc"|"desc"} [params.order="desc"]
+ * @returns {Promise<object>}
+ */
+export async function getScheduledOrdersHistory({
+  startDate,
+  endDate,
+  page = 1,
+  pageSize = DEFAULT_PAGE_LIMIT,
+  orderBy,
+  order,
+} = {}) {
+  const cappedSize = Math.min(pageSize, MAX_PAGE_LIMIT);
+  return await withRetry(() =>
+    qpilotRequest({
+      path: sitePath(`/ScheduledOrdersHistory`),
+      query: {
+        startDate,
+        endDate: coerceEndOfDay(endDate),
+        page,
+        pageSize: cappedSize,
+        orderBy,
+        order,
+      },
+    })
+  );
+}
+
+/**
+ * Convert a bare-date string ("YYYY-MM-DD") to its end-of-day UTC instant
+ * so date-range queries treat the upper bound as inclusive of the whole
+ * day. Strings that already have a time component pass through unchanged;
+ * non-strings and undefined pass through unchanged.
+ *
+ * @param {unknown} value
+ * @returns {unknown}
+ */
+function coerceEndOfDay(value) {
+  if (typeof value !== "string") return value;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return `${value}T23:59:59.999Z`;
+  return value;
+}
+
+/**
+ * Update a scheduled order via PUT. QPilot's generic PUT validates the body
+ * as a full entity (frequency, customerId, utcOffset, etc. are all required),
+ * so a partial body 400s on fields the user never touched. We fetch the
+ * current entity once, merge the caller's intent over it, strip nested/
+ * computed keys that can't safely round-trip, and PUT the result. The audit
+ * log still captures only the keys the caller actually set.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {Record<string,unknown>} params.properties Fields to write
+ */
+export async function updateScheduledOrder({ id, properties }) {
+  const path = orderPath(id);
+  const filterKeys = Object.keys(properties);
+
+  const existing = await withRetry(() => qpilotRequest({ path }));
+  const body = mergeForPut(existing, properties);
+
+  return await auditedMutation({
+    toolName: "update_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: async () => existing,
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({ path, method: "PUT", body })
+      );
+      return await withRetry(() => qpilotRequest({ path }));
+    },
+    filterCapturedKeys: filterKeys,
+  });
+}
+
+/**
+ * Fields returned by GET /ScheduledOrders/{id} that QPilot computes, manages,
+ * or treats as relations. They must not be echoed back through the generic
+ * PUT — either QPilot rejects them, or it tries to write them and produces
+ * confusing side effects.
+ */
+const PUT_STRIP_KEYS = new Set([
+  // Nested relations and embedded objects
+  "customer",
+  "site",
+  "scheduledOrderItems",
+  "lastProcessingCycle",
+  "shippingRateOptions",
+  "shippingRateCalculationErrors",
+  "couponsHistory",
+  "validationResult",
+  "dunning",
+  "processingCycles",
+  "eventLogs",
+  // Server-computed or QPilot-owned scalars
+  "lastProcessingCycleId",
+  "lastOccurrenceUtc",
+  "createdUtc",
+  "updatedUtc",
+  "lastEditableDate",
+  "lastChangeToDeleted",
+  "lifetimeValue",
+  "stripeUrl",
+  "displaySalePrice",
+  "frequencyDisplayName",
+  "scheduledOrderFailureReason",
+  "processingErrorCode",
+  "preProcessingValidationResultCode",
+  "subtotal",
+  "shippingTotal",
+  "taxTotal",
+  "total",
+  "shippingRateName",
+  "shippingRateId",
+  "estimatedDeliveryDate",
+  "locked",
+  "bundleName",
+  "originSubscriptionId",
+  "siteId",
+]);
+
+function mergeForPut(existing, properties) {
+  const merged = { ...existing, ...properties };
+  for (const k of PUT_STRIP_KEYS) delete merged[k];
+  return merged;
+}
+
+/**
+ * Change a scheduled order's status. Status is a path segment (not a body
+ * field), so we capture order state, PUT to the status route, then re-fetch.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {string} params.status New status (e.g. "Active", "Paused")
+ */
+export async function changeScheduledOrderStatus({ id, status }) {
+  return await auditedMutation({
+    toolName: "change_scheduled_order_status",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, status },
+    fetchExisting: () => withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({ path: statusPath(id, status), method: "PUT" })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: STATUS_AUDIT_KEYS,
+  });
+}
+
+/**
+ * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
+ * UI) so we skip the audit/rollback layer entirely.
+ *
+ * @param {string|number} id
+ */
+export async function deleteScheduledOrder(id) {
+  return await withRetry(() =>
+    qpilotRequest({ path: orderPath(id), method: "DELETE" })
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Rollback dispatcher
+// ---------------------------------------------------------------------------
+
+/**
+ * Both `update_scheduled_order` and `change_scheduled_order_status` are
+ * recorded as `operation: "update"`, so we register a single handler for
+ * (scheduled_orders, update) and dispatch by `tool_name`.
+ */
+async function rollbackUpdate(ctx) {
+  const tool = ctx.original.tool_name;
+  if (tool === "change_scheduled_order_status") {
+    return await rollbackStatusChange(ctx);
+  }
+  // Default: body-based PUT rollback. Used by `update_scheduled_order` and
+  // any future tool that records its mutations via auditedMutation with an
+  // `args.properties` shape.
+  return await rollbackBodyUpdate(ctx);
+}
+
+async function rollbackBodyUpdate({ original, options, auditedMutation, markRolledBack }) {
+  const id = original.object_id;
+  const oldVals = original.old_values ?? {};
+  const intent = original.args?.properties ?? {};
+  const keysToRevert = Object.keys(intent);
+  if (!keysToRevert.length) {
+    throw new Error(
+      `Audit row ${original.id} has no recorded args.properties — cannot determine what to revert`
+    );
+  }
+
+  const propsToWrite = {};
+  for (const k of keysToRevert) propsToWrite[k] = oldVals[k] ?? null;
+
+  const path = orderPath(id);
+  // Fetch once and reuse — drift check, audit pre-state capture, and merge
+  // body all want the same current snapshot. The generic PUT needs a full
+  // entity body for the same reason updateScheduledOrder does.
+  const current = await withRetry(() => qpilotRequest({ path }));
+  await assertNoDrift({
+    original,
+    options,
+    keys: keysToRevert,
+    fetchCurrent: async () => current,
+  });
+  const body = mergeForPut(current, propsToWrite);
+
+  const { audit_id, changed_fields } = await auditedMutation({
+    toolName: "rollback_change",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: {
+      rolled_back_audit_id: Number(original.id),
+      properties: propsToWrite,
+    },
+    fetchExisting: async () => current,
+    perform: async () => {
+      await withRetry(() => qpilotRequest({ path, method: "PUT", body }));
+      return await withRetry(() => qpilotRequest({ path }));
+    },
+    filterCapturedKeys: keysToRevert,
+    rollbackAuditId: Number(original.id),
+  });
+
+  markRolledBack(Number(original.id), audit_id);
+  return {
+    original_audit_id: Number(original.id),
+    rollback_audit_id: audit_id,
+    changed_fields,
+  };
+}
+
+async function rollbackStatusChange({ original, options, auditedMutation, markRolledBack }) {
+  const id = original.object_id;
+  const oldStatus = original.old_values?.status;
+  if (!oldStatus) {
+    throw new Error(
+      `Audit row ${original.id} has no captured old_values.status — cannot determine target status`
+    );
+  }
+
+  const getPath = orderPath(id);
+  const setPath = statusPath(id, oldStatus);
+
+  await assertNoDrift({
+    original,
+    options,
+    keys: ["status"],
+    fetchCurrent: () => qpilotRequest({ path: getPath }),
+  });
+
+  const { audit_id } = await auditedMutation({
+    toolName: "rollback_change",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: {
+      rolled_back_audit_id: Number(original.id),
+      status: oldStatus,
+    },
+    fetchExisting: () => withRetry(() => qpilotRequest({ path: getPath })),
+    perform: async () => {
+      await withRetry(() => qpilotRequest({ path: setPath, method: "PUT" }));
+      return await withRetry(() => qpilotRequest({ path: getPath }));
+    },
+    filterCapturedKeys: STATUS_AUDIT_KEYS,
+    rollbackAuditId: Number(original.id),
+  });
+
+  markRolledBack(Number(original.id), audit_id);
+  return {
+    original_audit_id: Number(original.id),
+    rollback_audit_id: audit_id,
+    reverted_status: oldStatus,
+  };
+}
+
+/**
+ * Compare current state to what the audit row recorded as `new_values` and
+ * abort if any tracked key has drifted. `options.force` skips the check.
+ */
+async function assertNoDrift({ original, options, keys, fetchCurrent }) {
+  if (options?.force) return;
+  const current = await withRetry(fetchCurrent);
+  const expected = original.new_values ?? {};
+  const drift = [];
+  for (const k of keys) {
+    if (String(current?.[k] ?? "") !== String(expected[k] ?? "")) {
+      drift.push({ field: k, expected: expected[k], current: current?.[k] });
+    }
+  }
+  if (!drift.length) return;
+  const lines = drift
+    .map(
+      (d) =>
+        `  - ${d.field}: expected ${JSON.stringify(d.expected)}, current ${JSON.stringify(d.current)}`
+    )
+    .join("\n");
+  throw new Error(
+    `Drift detected on audit_id ${original.id}:\n${lines}\nPass force: true to override.`
+  );
+}
+
+registerRollbackHandler(OBJECT_TYPE, "update", rollbackUpdate);
+
+// ---------------------------------------------------------------------------
+// Path helpers
+// ---------------------------------------------------------------------------
+
+function orderPath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}`);
+}
+
+function statusPath(id, status) {
+  return sitePath(
+    `/ScheduledOrders/${encodeURIComponent(id)}/status/${encodeURIComponent(status)}`
+  );
+}
