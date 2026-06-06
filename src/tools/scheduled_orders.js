@@ -12,6 +12,7 @@ import {
   getScheduledOrdersHistory,
   updateScheduledOrder,
   changeScheduledOrderStatus,
+  snoozeScheduledOrder,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
@@ -171,6 +172,43 @@ export function registerScheduledOrderTools(server) {
     async ({ id, status }) => {
       try {
         const out = await changeScheduledOrderStatus({ id, status });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "snooze_scheduled_order",
+    "Snooze a scheduled order until a future UTC date. QPilot auto-reactivates the order when the snooze period expires. CONSTRAINTS (QPilot will 400 otherwise): snooze_until_utc must be in the future; the order status must be Active or Paused; the order must not be in its lock window. snooze_duration and snooze_duration_type are optional supplemental metadata pairing a numeric value with a unit token (commonly 'Day','Week','Month'); they do not replace snooze_until_utc. Audited and rollback-capable — rollback restores the prior snooze fields via the generic PUT path.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      snooze_until_utc: z
+        .string()
+        .describe("ISO UTC date-time, must be in the future. Example: '2026-07-01T00:00:00Z'."),
+      snooze_duration: z
+        .number()
+        .int()
+        .optional()
+        .describe("Optional numeric duration; pairs with snooze_duration_type. Does NOT replace snooze_until_utc."),
+      snooze_duration_type: z
+        .string()
+        .optional()
+        .describe("Optional duration unit token (commonly 'Day', 'Week', 'Month'). Pairs with snooze_duration."),
+    },
+    async ({ id, snooze_until_utc, snooze_duration, snooze_duration_type }) => {
+      try {
+        const out = await snoozeScheduledOrder({
+          id,
+          snoozeUntilUtc: snooze_until_utc,
+          snoozeDuration: snooze_duration,
+          snoozeDurationType: snooze_duration_type,
+        });
         return jsonText({
           audit_id: out.audit_id,
           changed_fields: out.changed_fields,

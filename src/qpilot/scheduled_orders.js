@@ -30,6 +30,20 @@ const OBJECT_TYPE = "scheduled_orders";
 const STATUS_AUDIT_KEYS = ["id", "status", "isActive"];
 
 /**
+ * Properties captured on snooze audits. Must be a superset of every key the
+ * snooze body can write, because rollback reads `args.properties` and pulls
+ * each prior value from `old_values`.
+ */
+const SNOOZE_AUDIT_KEYS = [
+  "id",
+  "snoozeUntilUtc",
+  "snoozeDuration",
+  "snoozeDurationType",
+  "status",
+  "isActive",
+];
+
+/**
  * Fetch a single scheduled order by id.
  * @param {string|number} id
  * @returns {Promise<object>}
@@ -263,6 +277,55 @@ export async function changeScheduledOrderStatus({ id, status }) {
 }
 
 /**
+ * Snooze a scheduled order until a future date. Hits QPilot's dedicated
+ * /Snooze endpoint rather than routing through the generic merge-body PUT,
+ * so the wire payload is just the snooze fields.
+ *
+ * Audit shape uses `args.properties` so the existing body-PUT rollback path
+ * can restore the prior snooze fields without a dedicated handler. Rollback
+ * goes back through the generic PUT (mergeForPut), which is fine for clearing
+ * snoozes back to null but assumes QPilot's generic PUT doesn't re-validate
+ * the future-date rule for retro restorations — confirm at runtime.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {string} params.snoozeUntilUtc ISO date-time, must be in the future
+ * @param {number} [params.snoozeDuration] Optional supplemental duration value
+ * @param {string} [params.snoozeDurationType] Optional duration unit token
+ */
+export async function snoozeScheduledOrder({
+  id,
+  snoozeUntilUtc,
+  snoozeDuration,
+  snoozeDurationType,
+}) {
+  const properties = { snoozeUntilUtc };
+  if (snoozeDuration !== undefined) properties.snoozeDuration = snoozeDuration;
+  if (snoozeDurationType !== undefined)
+    properties.snoozeDurationType = snoozeDurationType;
+
+  return await auditedMutation({
+    toolName: "snooze_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: () =>
+      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: snoozePath(id),
+          method: "PUT",
+          body: properties,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: SNOOZE_AUDIT_KEYS,
+  });
+}
+
+/**
  * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
  * UI) so we skip the audit/rollback layer entirely.
  *
@@ -430,4 +493,8 @@ function statusPath(id, status) {
   return sitePath(
     `/ScheduledOrders/${encodeURIComponent(id)}/status/${encodeURIComponent(status)}`
   );
+}
+
+function snoozePath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Snooze`);
 }
