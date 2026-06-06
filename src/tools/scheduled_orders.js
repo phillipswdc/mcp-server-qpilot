@@ -185,7 +185,7 @@ export function registerScheduledOrderTools(server) {
 
   server.tool(
     "snooze_scheduled_order",
-    "Snooze a scheduled order until a future UTC date. QPilot auto-reactivates the order when the snooze period expires. CONSTRAINTS (QPilot will 400 otherwise): snooze_until_utc must be in the future; the order status must be Active or Paused; the order must not be in its lock window. snooze_duration and snooze_duration_type are optional supplemental metadata pairing a numeric value with a unit token (commonly 'Day','Week','Month'); they do not replace snooze_until_utc. Audited and rollback-capable — rollback restores the prior snooze fields via the generic PUT path.",
+    "Snooze a scheduled order until a future UTC date. QPilot auto-reactivates the order when the snooze period expires. REQUIRES the Snooze feature to be enabled at the SITE level — sites without it return HTTP 400 code 1010 ('Snooze feature is not enabled for this site') regardless of the order's state. Verified disabled on site 1113. Per-order CONSTRAINTS (QPilot will 400 otherwise): snooze_until_utc must be in the future; the order status must be Active or Paused; the order must not be in its lock window. snooze_duration and snooze_duration_type are optional supplemental metadata pairing a numeric value with a unit token (commonly 'Day','Week','Month'); they do not replace snooze_until_utc. Audited and rollback-capable — rollback restores the prior snooze fields via the generic PUT path.",
     {
       id: z.string().describe("Scheduled order id."),
       snooze_until_utc: z
