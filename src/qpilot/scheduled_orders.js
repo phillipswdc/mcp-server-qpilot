@@ -176,6 +176,38 @@ function coerceEndOfDay(value) {
 }
 
 /**
+ * QPilot's dedicated PUT .../NextOccurrenceUtc endpoint rejects timestamps
+ * whose fractional-second precision doesn't match the existing record's.
+ * Existing records use millisecond precision (`.sssZ`), so a caller sending
+ * `2030-01-01T00:00:00Z` gets a 400. We reformat the input to match the
+ * existing record's precision before sending. Falls back to millisecond
+ * precision if the existing value isn't a recognizable ISO string.
+ */
+function matchTimestampPrecision(input, existing) {
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return input;
+
+  let fractionalDigits = 3;
+  if (typeof existing === "string") {
+    const frac = existing.match(/\.(\d+)/);
+    if (frac) fractionalDigits = frac[1].length;
+    else if (/T\d{2}:\d{2}:\d{2}Z?$/.test(existing)) fractionalDigits = 0;
+  }
+
+  const iso = date.toISOString();
+  if (fractionalDigits === 3) return iso;
+  if (fractionalDigits === 0) return iso.replace(/\.\d+Z$/, "Z");
+  const parts = iso.match(/^(.+)\.(\d+)Z$/);
+  if (!parts) return iso;
+  const base = parts[1];
+  let f = parts[2];
+  f = fractionalDigits < f.length
+    ? f.slice(0, fractionalDigits)
+    : f.padEnd(fractionalDigits, "0");
+  return `${base}.${f}Z`;
+}
+
+/**
  * Update a scheduled order via PUT. QPilot's generic PUT validates the body
  * as a full entity (frequency, customerId, utcOffset, etc. are all required),
  * so a partial body 400s on fields the user never touched. We fetch the
@@ -355,14 +387,20 @@ export async function updateScheduledOrderNextOccurrence({
   id,
   nextOccurrenceUtc,
 }) {
-  const properties = { nextOccurrenceUtc };
+  const path = orderPath(id);
+  const existing = await withRetry(() => qpilotRequest({ path }));
+  const normalized = matchTimestampPrecision(
+    nextOccurrenceUtc,
+    existing?.nextOccurrenceUtc
+  );
+  const properties = { nextOccurrenceUtc: normalized };
+
   return await auditedMutation({
     toolName: "update_scheduled_order_next_occurrence",
     objectType: OBJECT_TYPE,
     operation: "update",
     args: { id, properties },
-    fetchExisting: () =>
-      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    fetchExisting: async () => existing,
     perform: async () => {
       await withRetry(() =>
         qpilotRequest({
@@ -371,7 +409,7 @@ export async function updateScheduledOrderNextOccurrence({
           body: properties,
         })
       );
-      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+      return await withRetry(() => qpilotRequest({ path }));
     },
     filterCapturedKeys: NEXT_OCCURRENCE_AUDIT_KEYS,
   });

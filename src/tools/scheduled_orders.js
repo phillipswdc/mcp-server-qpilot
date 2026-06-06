@@ -223,12 +223,12 @@ export function registerScheduledOrderTools(server) {
 
   server.tool(
     "update_scheduled_order_next_occurrence",
-    "Set a scheduled order's next-occurrence date via QPilot's dedicated PUT .../NextOccurrenceUtc endpoint. Surgical single-field update — avoids the full merge-body PUT used by update_scheduled_order. CONSTRAINTS (QPilot will 400 otherwise): next_occurrence_utc must be in the future; the order status must NOT be Processing or Deleted (Active, Paused, Failed are all accepted); the order must not be in its lock window. Audited and rollback-capable — rollback restores the prior nextOccurrenceUtc via the generic PUT path (the dedicated endpoint can't write past-dated values).",
+    "Set a scheduled order's next-occurrence date via QPilot's dedicated PUT .../NextOccurrenceUtc endpoint. Surgical single-field update — avoids the full merge-body PUT used by update_scheduled_order. CONSTRAINTS (QPilot will 400 otherwise): next_occurrence_utc must be in the future; the order status must NOT be Processing or Deleted (Active, Paused, Failed are all accepted); the order must not be in its lock window. Timestamp precision is auto-normalized to match the existing record's fractional-second precision (QPilot's endpoint is strict about this). Audited and rollback-capable — rollback restores the prior nextOccurrenceUtc via the generic PUT path (the dedicated endpoint can't write past-dated values).",
     {
       id: z.string().describe("Scheduled order id."),
       next_occurrence_utc: z
         .string()
-        .describe("ISO UTC date-time. Must be in the future. Example: '2026-07-01T14:00:00Z'."),
+        .describe("ISO UTC date-time. Must be in the future. Any ISO precision accepted — the server reformats to match the existing record's precision before sending. Example: '2026-07-01T14:00:00.000Z'."),
     },
     async ({ id, next_occurrence_utc }) => {
       try {
