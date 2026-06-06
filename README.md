@@ -65,7 +65,7 @@ separate per site.
 
 ---
 
-## Tools (22)
+## Tools (23)
 
 ### Scheduled orders
 | Tool | Purpose | Audited |
@@ -76,6 +76,7 @@ separate per site.
 | `update_scheduled_order` | Partial update via merge-body PUT | ✅ rollback-able |
 | `change_scheduled_order_status` | Active ⇄ Paused only | ✅ rollback-able |
 | `snooze_scheduled_order` | Snooze until a future UTC date (auto-reactivates) | ✅ rollback-able |
+| `update_scheduled_order_next_occurrence` | Surgical next-occurrence change via dedicated endpoint | ✅ rollback-able |
 | `delete_scheduled_order` | Soft-delete (recoverable in QPilot UI) | — (project rule) |
 
 ### Scheduled order items
