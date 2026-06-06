@@ -44,6 +44,17 @@ const SNOOZE_AUDIT_KEYS = [
 ];
 
 /**
+ * Properties captured on next-occurrence audits. Single writable key
+ * (nextOccurrenceUtc) plus status/isActive for forensic context.
+ */
+const NEXT_OCCURRENCE_AUDIT_KEYS = [
+  "id",
+  "nextOccurrenceUtc",
+  "status",
+  "isActive",
+];
+
+/**
  * Fetch a single scheduled order by id.
  * @param {string|number} id
  * @returns {Promise<object>}
@@ -326,6 +337,47 @@ export async function snoozeScheduledOrder({
 }
 
 /**
+ * Set the next-occurrence date on a scheduled order via QPilot's dedicated
+ * /NextOccurrenceUtc endpoint. Avoids the merge-body PUT round-trip used by
+ * updateScheduledOrder for a single-field change.
+ *
+ * Audit shape mirrors snoozeScheduledOrder — `args.properties` reuses the
+ * existing body-PUT rollback path. Rollback writes the prior
+ * nextOccurrenceUtc back via the generic PUT (mergeForPut), which is the
+ * only route that can write past-dated values (QPilot's dedicated endpoint
+ * enforces a future-date rule and would reject a retro-restoration).
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {string} params.nextOccurrenceUtc ISO date-time, must be in the future
+ */
+export async function updateScheduledOrderNextOccurrence({
+  id,
+  nextOccurrenceUtc,
+}) {
+  const properties = { nextOccurrenceUtc };
+  return await auditedMutation({
+    toolName: "update_scheduled_order_next_occurrence",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: () =>
+      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: nextOccurrencePath(id),
+          method: "PUT",
+          body: properties,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: NEXT_OCCURRENCE_AUDIT_KEYS,
+  });
+}
+
+/**
  * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
  * UI) so we skip the audit/rollback layer entirely.
  *
@@ -497,4 +549,8 @@ function statusPath(id, status) {
 
 function snoozePath(id) {
   return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Snooze`);
+}
+
+function nextOccurrencePath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/NextOccurrenceUtc`);
 }

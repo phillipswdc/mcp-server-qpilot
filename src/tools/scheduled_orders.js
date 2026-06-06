@@ -13,6 +13,7 @@ import {
   updateScheduledOrder,
   changeScheduledOrderStatus,
   snoozeScheduledOrder,
+  updateScheduledOrderNextOccurrence,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
@@ -208,6 +209,32 @@ export function registerScheduledOrderTools(server) {
           snoozeUntilUtc: snooze_until_utc,
           snoozeDuration: snooze_duration,
           snoozeDurationType: snooze_duration_type,
+        });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "update_scheduled_order_next_occurrence",
+    "Set a scheduled order's next-occurrence date via QPilot's dedicated PUT .../NextOccurrenceUtc endpoint. Surgical single-field update — avoids the full merge-body PUT used by update_scheduled_order. CONSTRAINTS (QPilot will 400 otherwise): next_occurrence_utc must be in the future; the order status must NOT be Processing or Deleted (Active, Paused, Failed are all accepted); the order must not be in its lock window. Audited and rollback-capable — rollback restores the prior nextOccurrenceUtc via the generic PUT path (the dedicated endpoint can't write past-dated values).",
+    {
+      id: z.string().describe("Scheduled order id."),
+      next_occurrence_utc: z
+        .string()
+        .describe("ISO UTC date-time. Must be in the future. Example: '2026-07-01T14:00:00Z'."),
+    },
+    async ({ id, next_occurrence_utc }) => {
+      try {
+        const out = await updateScheduledOrderNextOccurrence({
+          id,
+          nextOccurrenceUtc: next_occurrence_utc,
         });
         return jsonText({
           audit_id: out.audit_id,
