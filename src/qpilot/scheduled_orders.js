@@ -16,7 +16,7 @@
  */
 import { qpilotRequest, sitePath } from "./client.js";
 import { withRetry } from "./retry.js";
-import { auditedMutation } from "./_audit.js";
+import { auditedMutation, pickLastModifiedAt } from "./_audit.js";
 import { registerRollbackHandler } from "./audit.js";
 import { env } from "../config/env.js";
 import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from "../config/constants.js";
@@ -28,6 +28,76 @@ const OBJECT_TYPE = "scheduled_orders";
  * while still letting rollback recover the prior status from old_values.
  */
 const STATUS_AUDIT_KEYS = ["id", "status", "isActive"];
+
+/**
+ * Properties captured on snooze audits. Must be a superset of every key the
+ * snooze body can write, because rollback reads `args.properties` and pulls
+ * each prior value from `old_values`.
+ */
+const SNOOZE_AUDIT_KEYS = [
+  "id",
+  "snoozeUntilUtc",
+  "snoozeDuration",
+  "snoozeDurationType",
+  "status",
+  "isActive",
+];
+
+/**
+ * Properties captured on next-occurrence audits. Single writable key
+ * (nextOccurrenceUtc) plus status/isActive for forensic context.
+ */
+const NEXT_OCCURRENCE_AUDIT_KEYS = [
+  "id",
+  "nextOccurrenceUtc",
+  "status",
+  "isActive",
+];
+
+/**
+ * Properties captured on frequency audits. Both writable keys plus
+ * status/isActive for forensic context. Must include every key the
+ * frequency body can write, because rollback reads `args.properties` and
+ * pulls each prior value from `old_values`.
+ */
+const FREQUENCY_AUDIT_KEYS = [
+  "id",
+  "frequency",
+  "frequencyType",
+  "status",
+  "isActive",
+];
+
+/**
+ * Properties captured on Retry audits. Retry triggers a processing cycle,
+ * so we capture status + the cycle progress fields so the audit row tells
+ * a complete forensic story about what the retry attempt did. There's no
+ * "writable key" set here because Retry takes no body — the order changes
+ * are side effects of the cycle.
+ */
+const RETRY_AUDIT_KEYS = [
+  "id",
+  "status",
+  "isActive",
+  "nextOccurrenceUtc",
+  "lastOccurrenceUtc",
+  "lastProcessingCycleId",
+  "scheduledOrderFailureReason",
+  "processingErrorCode",
+];
+
+/**
+ * Properties captured on payment-method-change audits. Single writable key
+ * (paymentMethodId) plus status/isActive for forensic context. The
+ * embedded `paymentMethod` object on the entity is QPilot-resolved from
+ * the id, so we don't track it directly.
+ */
+const PAYMENT_METHOD_AUDIT_KEYS = [
+  "id",
+  "paymentMethodId",
+  "status",
+  "isActive",
+];
 
 /**
  * Fetch a single scheduled order by id.
@@ -151,6 +221,38 @@ function coerceEndOfDay(value) {
 }
 
 /**
+ * QPilot's dedicated PUT .../NextOccurrenceUtc endpoint rejects timestamps
+ * whose fractional-second precision doesn't match the existing record's.
+ * Existing records use millisecond precision (`.sssZ`), so a caller sending
+ * `2030-01-01T00:00:00Z` gets a 400. We reformat the input to match the
+ * existing record's precision before sending. Falls back to millisecond
+ * precision if the existing value isn't a recognizable ISO string.
+ */
+function matchTimestampPrecision(input, existing) {
+  const date = new Date(input);
+  if (Number.isNaN(date.getTime())) return input;
+
+  let fractionalDigits = 3;
+  if (typeof existing === "string") {
+    const frac = existing.match(/\.(\d+)/);
+    if (frac) fractionalDigits = frac[1].length;
+    else if (/T\d{2}:\d{2}:\d{2}Z?$/.test(existing)) fractionalDigits = 0;
+  }
+
+  const iso = date.toISOString();
+  if (fractionalDigits === 3) return iso;
+  if (fractionalDigits === 0) return iso.replace(/\.\d+Z$/, "Z");
+  const parts = iso.match(/^(.+)\.(\d+)Z$/);
+  if (!parts) return iso;
+  const base = parts[1];
+  let f = parts[2];
+  f = fractionalDigits < f.length
+    ? f.slice(0, fractionalDigits)
+    : f.padEnd(fractionalDigits, "0");
+  return `${base}.${f}Z`;
+}
+
+/**
  * Update a scheduled order via PUT. QPilot's generic PUT validates the body
  * as a full entity (frequency, customerId, utcOffset, etc. are all required),
  * so a partial body 400s on fields the user never touched. We fetch the
@@ -263,6 +365,296 @@ export async function changeScheduledOrderStatus({ id, status }) {
 }
 
 /**
+ * Snooze a scheduled order until a future date. Hits QPilot's dedicated
+ * /Snooze endpoint rather than routing through the generic merge-body PUT,
+ * so the wire payload is just the snooze fields.
+ *
+ * Audit shape uses `args.properties` so the existing body-PUT rollback path
+ * can restore the prior snooze fields without a dedicated handler. Rollback
+ * goes back through the generic PUT (mergeForPut), which is fine for clearing
+ * snoozes back to null but assumes QPilot's generic PUT doesn't re-validate
+ * the future-date rule for retro restorations — confirm at runtime.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {string} params.snoozeUntilUtc ISO date-time, must be in the future
+ * @param {number} [params.snoozeDuration] Optional supplemental duration value
+ * @param {string} [params.snoozeDurationType] Optional duration unit token
+ */
+export async function snoozeScheduledOrder({
+  id,
+  snoozeUntilUtc,
+  snoozeDuration,
+  snoozeDurationType,
+}) {
+  const properties = { snoozeUntilUtc };
+  if (snoozeDuration !== undefined) properties.snoozeDuration = snoozeDuration;
+  if (snoozeDurationType !== undefined)
+    properties.snoozeDurationType = snoozeDurationType;
+
+  return await auditedMutation({
+    toolName: "snooze_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: () =>
+      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: snoozePath(id),
+          method: "PUT",
+          body: properties,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: SNOOZE_AUDIT_KEYS,
+  });
+}
+
+/**
+ * Set the next-occurrence date on a scheduled order via QPilot's dedicated
+ * /NextOccurrenceUtc endpoint. Avoids the merge-body PUT round-trip used by
+ * updateScheduledOrder for a single-field change.
+ *
+ * Audit shape mirrors snoozeScheduledOrder — `args.properties` reuses the
+ * existing body-PUT rollback path. Rollback writes the prior
+ * nextOccurrenceUtc back via the generic PUT (mergeForPut), which is the
+ * only route that can write past-dated values (QPilot's dedicated endpoint
+ * enforces a future-date rule and would reject a retro-restoration).
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {string} params.nextOccurrenceUtc ISO date-time, must be in the future
+ */
+export async function updateScheduledOrderNextOccurrence({
+  id,
+  nextOccurrenceUtc,
+}) {
+  const path = orderPath(id);
+  const existing = await withRetry(() => qpilotRequest({ path }));
+  const normalized = matchTimestampPrecision(
+    nextOccurrenceUtc,
+    existing?.nextOccurrenceUtc
+  );
+  const properties = { nextOccurrenceUtc: normalized };
+
+  return await auditedMutation({
+    toolName: "update_scheduled_order_next_occurrence",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: async () => existing,
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: nextOccurrencePath(id),
+          method: "PUT",
+          body: properties,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path }));
+    },
+    filterCapturedKeys: NEXT_OCCURRENCE_AUDIT_KEYS,
+  });
+}
+
+/**
+ * Change a scheduled order's recurrence frequency via QPilot's dedicated
+ * /Frequency endpoint. QPilot requires `frequencyType` in the body; we
+ * accept either or both fields and fill the omitted one from the existing
+ * record so callers only need to specify what they're changing. Rollback
+ * is scoped to the keys the caller actually set (rollbackBodyUpdate reads
+ * `args.properties`), so changing only the number won't revert the type.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {number} [params.frequency] Integer 1-365 (QPilot range)
+ * @param {string} [params.frequencyType] One of Days, Weeks, Months,
+ *   DayOfTheWeek, DayOfTheMonth
+ */
+export async function updateScheduledOrderFrequency({
+  id,
+  frequency,
+  frequencyType,
+}) {
+  if (frequency === undefined && frequencyType === undefined) {
+    throw new Error(
+      "update_scheduled_order_frequency requires at least one of `frequency` or `frequency_type`"
+    );
+  }
+
+  const path = orderPath(id);
+  const existing = await withRetry(() => qpilotRequest({ path }));
+
+  const properties = {};
+  if (frequency !== undefined) properties.frequency = frequency;
+  if (frequencyType !== undefined) properties.frequencyType = frequencyType;
+
+  const body = {
+    frequency: frequency ?? existing?.frequency,
+    frequencyType: frequencyType ?? existing?.frequencyType,
+  };
+
+  return await auditedMutation({
+    toolName: "update_scheduled_order_frequency",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: async () => existing,
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: frequencyPath(id),
+          method: "PUT",
+          body,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path }));
+    },
+    filterCapturedKeys: FREQUENCY_AUDIT_KEYS,
+  });
+}
+
+/**
+ * "Safely" reactivate a scheduled order via QPilot's dedicated /SafeActivate
+ * endpoint. Distinct from `change_scheduled_order_status` because that route
+ * only accepts Active/Paused transitions — Failed orders need this path to
+ * get back to Active, and soft-deleted orders need this path with
+ * allowDeleted=true. QPilot runs its own safety checks (lock window etc.)
+ * before flipping status.
+ *
+ * Audit captures status/isActive via STATUS_AUDIT_KEYS so the rollback
+ * dispatcher can route based on prior status. Rollback support:
+ *   - prior Paused → revert via status endpoint
+ *   - prior Deleted → re-soft-delete via DELETE
+ *   - prior Active → "nothing to roll back" (state didn't change)
+ *   - prior Failed (or anything else) → refused; the API has no path back
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {boolean} [params.allowDeleted=false] When true, also accepts
+ *   orders currently in Deleted (soft-deleted) status. Default behavior
+ *   400s on Deleted orders.
+ */
+export async function safeActivateScheduledOrder({ id, allowDeleted = false }) {
+  return await auditedMutation({
+    toolName: "safe_activate_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, allowDeleted },
+    fetchExisting: () =>
+      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: safeActivatePath(id),
+          method: "PUT",
+          query: allowDeleted ? { allowDeleted: true } : undefined,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: STATUS_AUDIT_KEYS,
+  });
+}
+
+/**
+ * Retry processing for a scheduled order via QPilot's dedicated /Retry
+ * endpoint. CAUTION: this triggers a real processing cycle attempt, which
+ * almost certainly means a payment-gateway call. Failed payments can leave
+ * the order in a different failure state than before; successful payments
+ * cannot be unwound by rollback.
+ *
+ * QPilot's docs page for this endpoint is essentially empty (no body
+ * spec, no preconditions, no documented errors). Treating it as a no-body
+ * POST until live testing surfaces a different shape.
+ *
+ * TODO(2026-06-07): no end-to-end smoke test yet — needs a SO in Failed
+ * status on a test site. Verify response shape, preconditions, and which
+ * fields actually change before relying on this in production. Tracked
+ * in the `retry-smoke-test-pending` memory entry.
+ *
+ * Rollback dispatcher routes `retry_scheduled_order` to rollbackRetry,
+ * which refuses every time — payment attempts can't be reversed via the
+ * API.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ */
+export async function retryScheduledOrder({ id }) {
+  return await auditedMutation({
+    toolName: "retry_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id },
+    fetchExisting: () =>
+      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: retryPath(id),
+          method: "POST",
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: RETRY_AUDIT_KEYS,
+  });
+}
+
+/**
+ * Change which payment method backs a scheduled order via QPilot's dedicated
+ * PATCH .../PaymentMethod endpoint. The target payment method must already
+ * exist on the site (QPilot 400s with "Payment method does not exist"
+ * otherwise). QPilot's docs don't explicitly require the payment method to
+ * belong to the SO's customer, but that's the operational expectation —
+ * verify behavior empirically the first time you cross-link.
+ *
+ * Rollback routes through the default `rollbackBodyUpdate` (generic PUT)
+ * because `paymentMethodId` is not in PUT_STRIP_KEYS — the generic PUT can
+ * write the prior scalar back. No dedicated handler needed.
+ *
+ * TODO(2026-06-07): no end-to-end smoke test yet — needs a second valid
+ * paymentMethodId on site 1113 to swap SO 208022 between. Verify the
+ * happy-path PATCH, the rollback via generic PUT, and confirm whether
+ * QPilot enforces customer-ownership of the payment method. Tracked in
+ * the `payment_method_smoke_test_pending` memory entry.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {number} params.paymentMethodId QPilot's numeric payment method id
+ *   (int64). Discover via /Sites/{siteId}/PaymentMethods or via the
+ *   customer's PaymentMethods endpoint (not yet exposed as a tool — see
+ *   roadmap step 2).
+ */
+export async function changeScheduledOrderPaymentMethod({ id, paymentMethodId }) {
+  const path = orderPath(id);
+  const existing = await withRetry(() => qpilotRequest({ path }));
+  const properties = { paymentMethodId };
+
+  return await auditedMutation({
+    toolName: "change_scheduled_order_payment_method",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: async () => existing,
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: paymentMethodPath(id),
+          method: "PATCH",
+          body: properties,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path }));
+    },
+    filterCapturedKeys: PAYMENT_METHOD_AUDIT_KEYS,
+  });
+}
+
+/**
  * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
  * UI) so we skip the audit/rollback layer entirely.
  *
@@ -279,19 +671,36 @@ export async function deleteScheduledOrder(id) {
 // ---------------------------------------------------------------------------
 
 /**
- * Both `update_scheduled_order` and `change_scheduled_order_status` are
- * recorded as `operation: "update"`, so we register a single handler for
- * (scheduled_orders, update) and dispatch by `tool_name`.
+ * All scheduled-order mutations are recorded as `operation: "update"`, so we
+ * register a single handler for (scheduled_orders, update) and dispatch by
+ * `tool_name`. Default path is body-based PUT rollback (snooze, next-
+ * occurrence, frequency, and update_scheduled_order all funnel here).
  */
 async function rollbackUpdate(ctx) {
   const tool = ctx.original.tool_name;
   if (tool === "change_scheduled_order_status") {
     return await rollbackStatusChange(ctx);
   }
-  // Default: body-based PUT rollback. Used by `update_scheduled_order` and
-  // any future tool that records its mutations via auditedMutation with an
-  // `args.properties` shape.
+  if (tool === "safe_activate_scheduled_order") {
+    return await rollbackSafeActivate(ctx);
+  }
+  if (tool === "retry_scheduled_order") {
+    return await rollbackRetry(ctx);
+  }
   return await rollbackBodyUpdate(ctx);
+}
+
+/**
+ * Rollback for `retry_scheduled_order`. Always refuses: a Retry triggers a
+ * processing cycle that may have included a payment-gateway call, and
+ * those side effects cannot be reversed by an API call. The audit row
+ * still carries forensic intent and the captured field changes, but
+ * rollback_change is not a valid response to "I shouldn't have retried."
+ */
+async function rollbackRetry({ original }) {
+  throw new Error(
+    `Audit row ${original.id} cannot be rolled back: retry_scheduled_order triggers a processing cycle (payment-gateway side effects). Once attempted, the cycle cannot be reversed via the API. Investigate the resulting state in the QPilot UI and remediate manually if needed.`
+  );
 }
 
 async function rollbackBodyUpdate({ original, options, auditedMutation, markRolledBack }) {
@@ -391,12 +800,106 @@ async function rollbackStatusChange({ original, options, auditedMutation, markRo
 }
 
 /**
+ * Rollback for `safe_activate_scheduled_order`. SafeActivate transitions an
+ * order to Active (or Paused, depending on QPilot's internal logic), so the
+ * inverse depends on what the prior status was. We dispatch by old_values:
+ *
+ *   - "Paused" → PUT .../status/Paused (mirrors rollbackStatusChange)
+ *   - "Deleted" → DELETE (re-soft-delete via the same path the delete tool uses)
+ *   - "Active" → refuse: the original SafeActivate didn't change status, so
+ *     there is nothing to revert
+ *   - anything else (notably "Failed"): refuse with a clear message — QPilot's
+ *     status endpoint only accepts Active/Paused, so Failed isn't reachable
+ *     via the API. Operator has to manually intervene in the QPilot UI.
+ */
+async function rollbackSafeActivate({ original, options, auditedMutation, markRolledBack }) {
+  const id = original.object_id;
+  const oldStatus = original.old_values?.status;
+  if (!oldStatus) {
+    throw new Error(
+      `Audit row ${original.id} has no captured old_values.status — cannot determine SafeActivate rollback target`
+    );
+  }
+  if (oldStatus === "Active") {
+    throw new Error(
+      `Audit row ${original.id}: original status was already "Active" before SafeActivate — nothing to roll back.`
+    );
+  }
+  if (oldStatus !== "Paused" && oldStatus !== "Deleted") {
+    throw new Error(
+      `Rolling back SafeActivate when the original status was "${oldStatus}" is not supported via the API — QPilot's status endpoint only accepts Active or Paused, and there is no path back to ${oldStatus}. Restore manually in the QPilot UI.`
+    );
+  }
+
+  const getPath = orderPath(id);
+
+  await assertNoDrift({
+    original,
+    options,
+    keys: ["status"],
+    fetchCurrent: () => qpilotRequest({ path: getPath }),
+  });
+
+  const performFn =
+    oldStatus === "Paused"
+      ? async () => {
+          await withRetry(() =>
+            qpilotRequest({ path: statusPath(id, "Paused"), method: "PUT" })
+          );
+          return await withRetry(() => qpilotRequest({ path: getPath }));
+        }
+      : async () => {
+          await withRetry(() =>
+            qpilotRequest({ path: getPath, method: "DELETE" })
+          );
+          return await withRetry(() => qpilotRequest({ path: getPath }));
+        };
+
+  const { audit_id } = await auditedMutation({
+    toolName: "rollback_change",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { rolled_back_audit_id: Number(original.id), target_status: oldStatus },
+    fetchExisting: () => withRetry(() => qpilotRequest({ path: getPath })),
+    perform: performFn,
+    filterCapturedKeys: STATUS_AUDIT_KEYS,
+    rollbackAuditId: Number(original.id),
+  });
+
+  markRolledBack(Number(original.id), audit_id);
+  return {
+    original_audit_id: Number(original.id),
+    rollback_audit_id: audit_id,
+    reverted_status: oldStatus,
+  };
+}
+
+/**
  * Compare current state to what the audit row recorded as `new_values` and
  * abort if any tracked key has drifted. `options.force` skips the check.
  */
 async function assertNoDrift({ original, options, keys, fetchCurrent }) {
   if (options?.force) return;
   const current = await withRetry(fetchCurrent);
+
+  // Coarse pre-check: QPilot's `updatedUtc` is the closest thing it exposes
+  // to an ETag. If it has advanced since our mutation recorded
+  // `last_modified_at`, something on the entity changed — even on a field
+  // we don't track in `filterCapturedKeys`. We catch that here before the
+  // narrow field-level comparison so side-band UI edits don't slip through.
+  // Skipped when either timestamp is missing (older audits won't have one).
+  const expectedLm = original.last_modified_at;
+  const currentLm = pickLastModifiedAt(current);
+  if (
+    Number.isFinite(expectedLm) &&
+    Number.isFinite(currentLm) &&
+    expectedLm !== currentLm
+  ) {
+    throw new Error(
+      `Drift detected on audit_id ${original.id}: entity updatedUtc has advanced from ${new Date(expectedLm).toISOString()} (recorded) to ${new Date(currentLm).toISOString()} (live). Something modified the entity after this mutation. Pass force: true to override.`
+    );
+  }
+
   const expected = original.new_values ?? {};
   const drift = [];
   for (const k of keys) {
@@ -430,4 +933,28 @@ function statusPath(id, status) {
   return sitePath(
     `/ScheduledOrders/${encodeURIComponent(id)}/status/${encodeURIComponent(status)}`
   );
+}
+
+function snoozePath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Snooze`);
+}
+
+function nextOccurrencePath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/NextOccurrenceUtc`);
+}
+
+function frequencyPath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Frequency`);
+}
+
+function safeActivatePath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/SafeActivate`);
+}
+
+function retryPath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Retry`);
+}
+
+function paymentMethodPath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/PaymentMethod`);
 }

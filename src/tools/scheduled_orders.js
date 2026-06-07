@@ -12,6 +12,12 @@ import {
   getScheduledOrdersHistory,
   updateScheduledOrder,
   changeScheduledOrderStatus,
+  snoozeScheduledOrder,
+  updateScheduledOrderNextOccurrence,
+  updateScheduledOrderFrequency,
+  safeActivateScheduledOrder,
+  retryScheduledOrder,
+  changeScheduledOrderPaymentMethod,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
@@ -171,6 +177,179 @@ export function registerScheduledOrderTools(server) {
     async ({ id, status }) => {
       try {
         const out = await changeScheduledOrderStatus({ id, status });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "snooze_scheduled_order",
+    "Snooze a scheduled order until a future UTC date. QPilot auto-reactivates the order when the snooze period expires. REQUIRES the Snooze feature to be enabled at the SITE level — sites without it return HTTP 400 code 1010 ('Snooze feature is not enabled for this site') regardless of the order's state. Verified disabled on site 1113. Per-order CONSTRAINTS (QPilot will 400 otherwise): snooze_until_utc must be in the future; the order status must be Active or Paused; the order must not be in its lock window. snooze_duration and snooze_duration_type are optional supplemental metadata pairing a numeric value with a unit token (commonly 'Day','Week','Month'); they do not replace snooze_until_utc. Audited and rollback-capable — rollback restores the prior snooze fields via the generic PUT path.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      snooze_until_utc: z
+        .string()
+        .describe("ISO UTC date-time, must be in the future. Example: '2026-07-01T00:00:00Z'."),
+      snooze_duration: z
+        .number()
+        .int()
+        .optional()
+        .describe("Optional numeric duration; pairs with snooze_duration_type. Does NOT replace snooze_until_utc."),
+      snooze_duration_type: z
+        .string()
+        .optional()
+        .describe("Optional duration unit token (commonly 'Day', 'Week', 'Month'). Pairs with snooze_duration."),
+    },
+    async ({ id, snooze_until_utc, snooze_duration, snooze_duration_type }) => {
+      try {
+        const out = await snoozeScheduledOrder({
+          id,
+          snoozeUntilUtc: snooze_until_utc,
+          snoozeDuration: snooze_duration,
+          snoozeDurationType: snooze_duration_type,
+        });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "update_scheduled_order_next_occurrence",
+    "Set a scheduled order's next-occurrence date via QPilot's dedicated PUT .../NextOccurrenceUtc endpoint. Surgical single-field update — avoids the full merge-body PUT used by update_scheduled_order. CONSTRAINTS (QPilot will 400 otherwise): next_occurrence_utc must be in the future; the order status must NOT be Processing or Deleted (Active, Paused, Failed are all accepted); the order must not be in its lock window. Timestamp precision is auto-normalized to match the existing record's fractional-second precision (QPilot's endpoint is strict about this). Audited and rollback-capable — rollback restores the prior nextOccurrenceUtc via the generic PUT path (the dedicated endpoint can't write past-dated values).",
+    {
+      id: z.string().describe("Scheduled order id."),
+      next_occurrence_utc: z
+        .string()
+        .describe("ISO UTC date-time. Must be in the future. Any ISO precision accepted — the server reformats to match the existing record's precision before sending. Example: '2026-07-01T14:00:00.000Z'."),
+    },
+    async ({ id, next_occurrence_utc }) => {
+      try {
+        const out = await updateScheduledOrderNextOccurrence({
+          id,
+          nextOccurrenceUtc: next_occurrence_utc,
+        });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "update_scheduled_order_frequency",
+    "Change a scheduled order's recurrence frequency via QPilot's dedicated PUT .../Frequency endpoint. Surgical single-purpose update — avoids the full merge-body PUT used by update_scheduled_order. Accepts `frequency` (integer 1-365) and/or `frequency_type` (Days, Weeks, Months, DayOfTheWeek, DayOfTheMonth); at least one is required. QPilot's endpoint requires both in the body, so any omitted field is filled from the existing record before sending. CONSTRAINTS (QPilot will 400 otherwise): the order status must NOT be Processing or Deleted; the order must not be in its lock window. Audited and rollback-capable — rollback restores only the field(s) the caller actually set, via the generic PUT path.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      frequency: z
+        .number()
+        .int()
+        .min(1)
+        .max(365)
+        .optional()
+        .describe("Recurrence interval count. Integer 1-365. Omit to keep current value (frequency_type must then be provided)."),
+      frequency_type: z
+        .enum(["Days", "Weeks", "Months", "DayOfTheWeek", "DayOfTheMonth"])
+        .optional()
+        .describe("Recurrence unit. Omit to keep current value (frequency must then be provided)."),
+    },
+    async ({ id, frequency, frequency_type }) => {
+      try {
+        const out = await updateScheduledOrderFrequency({
+          id,
+          frequency,
+          frequencyType: frequency_type,
+        });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "safe_activate_scheduled_order",
+    "Reactivate a scheduled order via QPilot's dedicated PUT .../SafeActivate endpoint. Distinct from change_scheduled_order_status because that route only accepts Active/Paused transitions — Failed and Snoozed orders need this path to get back to Active, and soft-deleted orders need this path with allow_deleted=true to be restored. QPilot runs its own safety checks (lock window etc.) before flipping status. CONSTRAINTS (QPilot will 400 otherwise): the order status MUST be Failed, Paused, or Snoozed (Active orders are refused with code 1001 'Can only activate Scheduled Orders with statuses $Failed, $Paused or $Snoozed'); if status is Deleted, allow_deleted must be true (Deleted is then also accepted); the order must NOT be in Processing or its lock window. Audited and rollback-capable for Paused→Active (revert via status endpoint) and Deleted→Active (revert via DELETE) transitions. Failed→Active rollback is refused with a clear message — QPilot's status endpoint won't accept Failed as a target, so restore manually in the QPilot UI if needed.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      allow_deleted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("When true, allow reviving an order currently in Deleted (soft-deleted) status. Default false — the endpoint 400s on Deleted orders without this flag."),
+    },
+    async ({ id, allow_deleted }) => {
+      try {
+        const out = await safeActivateScheduledOrder({
+          id,
+          allowDeleted: allow_deleted,
+        });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "retry_scheduled_order",
+    "Retry processing for a scheduled order via QPilot's dedicated POST .../Retry endpoint. ⚠️ HIGH-IMPACT: this triggers a real processing cycle, which almost certainly includes a payment-gateway call. Use only on orders that genuinely need a retry (typically status `Failed`). QPilot's docs page for this endpoint is sparse — preconditions, body shape, and error codes are NOT documented, so expect to learn empirically from QPilot's 4xx responses on first uses. NOT rollback-able: payment attempts cannot be reversed via the API. The audit row captures status / nextOccurrenceUtc / lastOccurrenceUtc / lastProcessingCycleId / failure-reason fields for forensic traceability, but `rollback_change` will refuse with a clear message. END-TO-END SMOKE TEST PENDING: this tool has not yet been validated against a real Failed order — first production use is the test.",
+    {
+      id: z.string().describe("Scheduled order id. Typically in status Failed (the canonical retryable case)."),
+    },
+    async ({ id }) => {
+      try {
+        const out = await retryScheduledOrder({ id });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "change_scheduled_order_payment_method",
+    "Change which payment method backs a scheduled order via QPilot's dedicated PATCH .../PaymentMethod endpoint. Caller supplies the target QPilot int64 paymentMethodId; the embedded paymentMethod object on the SO is QPilot-resolved from the id. CONSTRAINTS (QPilot will 400 otherwise): the payment method must already exist on the site (error: 'Payment method does not exist'); the order status must NOT be Processing or Deleted; the order must not be in its lock window. Discovering the right paymentMethodId: until get_customer_payment_methods ships (roadmap step 2), callers need to know the id out of band — typically from the QPilot UI or from the SO's current `paymentMethodId` field. Audited and rollback-able via the generic PUT path; rollback restores the prior paymentMethodId.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      payment_method_id: z
+        .number()
+        .int()
+        .describe("QPilot's int64 payment method id to assign. Must already exist on the site."),
+    },
+    async ({ id, payment_method_id }) => {
+      try {
+        const out = await changeScheduledOrderPaymentMethod({
+          id,
+          paymentMethodId: payment_method_id,
+        });
         return jsonText({
           audit_id: out.audit_id,
           changed_fields: out.changed_fields,

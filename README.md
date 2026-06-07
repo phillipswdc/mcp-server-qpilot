@@ -65,7 +65,7 @@ separate per site.
 
 ---
 
-## Tools (21)
+## Tools (27)
 
 ### Scheduled orders
 | Tool | Purpose | Audited |
@@ -75,6 +75,12 @@ separate per site.
 | `get_scheduled_order_history` | QPilot's `/ScheduledOrdersHistory` (date range) | — |
 | `update_scheduled_order` | Partial update via merge-body PUT | ✅ rollback-able |
 | `change_scheduled_order_status` | Active ⇄ Paused only | ✅ rollback-able |
+| `snooze_scheduled_order` | Snooze until a future UTC date (auto-reactivates) | ✅ rollback-able |
+| `update_scheduled_order_next_occurrence` | Surgical next-occurrence change via dedicated endpoint | ✅ rollback-able |
+| `update_scheduled_order_frequency` | Change recurrence frequency/type via dedicated endpoint | ✅ rollback-able |
+| `safe_activate_scheduled_order` | Reactivate via dedicated SafeActivate endpoint (handles Failed→Active and, with `allow_deleted`, Deleted→Active) | ✅ rollback-able for Paused/Deleted prior states |
+| `retry_scheduled_order` | Trigger a processing-cycle retry via POST .../Retry. ⚠️ Real payment-gateway side effects. **Smoke test pending** — see TODO in source | ❌ not rollback-able (payment side effects can't be reversed) |
+| `change_scheduled_order_payment_method` | Swap the payment method backing an SO via dedicated PATCH .../PaymentMethod endpoint. **Smoke test pending** — needs a second valid PM on site 1113 | ✅ rollback-able (via generic PUT) |
 | `delete_scheduled_order` | Soft-delete (recoverable in QPilot UI) | — (project rule) |
 
 ### Scheduled order items

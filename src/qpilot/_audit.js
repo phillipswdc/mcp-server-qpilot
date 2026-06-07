@@ -120,9 +120,12 @@ function pickId(obj) {
   return candidate != null ? String(candidate) : null;
 }
 
-function pickLastModifiedAt(obj) {
+export function pickLastModifiedAt(obj) {
   if (!obj || typeof obj !== "object") return null;
+  // `updatedUtc` is QPilot's actual field name on scheduled orders and items;
+  // the others are kept as fallbacks for entities we haven't surveyed yet.
   const candidates = [
+    obj.updatedUtc,
     obj.lastModifiedAt,
     obj.updatedAt,
     obj.modifiedAt,
