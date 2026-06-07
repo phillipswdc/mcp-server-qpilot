@@ -16,6 +16,7 @@ import {
   updateScheduledOrderNextOccurrence,
   updateScheduledOrderFrequency,
   safeActivateScheduledOrder,
+  retryScheduledOrder,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
@@ -301,6 +302,26 @@ export function registerScheduledOrderTools(server) {
           id,
           allowDeleted: allow_deleted,
         });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "retry_scheduled_order",
+    "Retry processing for a scheduled order via QPilot's dedicated POST .../Retry endpoint. ⚠️ HIGH-IMPACT: this triggers a real processing cycle, which almost certainly includes a payment-gateway call. Use only on orders that genuinely need a retry (typically status `Failed`). QPilot's docs page for this endpoint is sparse — preconditions, body shape, and error codes are NOT documented, so expect to learn empirically from QPilot's 4xx responses on first uses. NOT rollback-able: payment attempts cannot be reversed via the API. The audit row captures status / nextOccurrenceUtc / lastOccurrenceUtc / lastProcessingCycleId / failure-reason fields for forensic traceability, but `rollback_change` will refuse with a clear message. END-TO-END SMOKE TEST PENDING: this tool has not yet been validated against a real Failed order — first production use is the test.",
+    {
+      id: z.string().describe("Scheduled order id. Typically in status Failed (the canonical retryable case)."),
+    },
+    async ({ id }) => {
+      try {
+        const out = await retryScheduledOrder({ id });
         return jsonText({
           audit_id: out.audit_id,
           changed_fields: out.changed_fields,

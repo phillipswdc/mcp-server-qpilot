@@ -69,6 +69,24 @@ const FREQUENCY_AUDIT_KEYS = [
 ];
 
 /**
+ * Properties captured on Retry audits. Retry triggers a processing cycle,
+ * so we capture status + the cycle progress fields so the audit row tells
+ * a complete forensic story about what the retry attempt did. There's no
+ * "writable key" set here because Retry takes no body — the order changes
+ * are side effects of the cycle.
+ */
+const RETRY_AUDIT_KEYS = [
+  "id",
+  "status",
+  "isActive",
+  "nextOccurrenceUtc",
+  "lastOccurrenceUtc",
+  "lastProcessingCycleId",
+  "scheduledOrderFailureReason",
+  "processingErrorCode",
+];
+
+/**
  * Fetch a single scheduled order by id.
  * @param {string|number} id
  * @returns {Promise<object>}
@@ -530,6 +548,50 @@ export async function safeActivateScheduledOrder({ id, allowDeleted = false }) {
 }
 
 /**
+ * Retry processing for a scheduled order via QPilot's dedicated /Retry
+ * endpoint. CAUTION: this triggers a real processing cycle attempt, which
+ * almost certainly means a payment-gateway call. Failed payments can leave
+ * the order in a different failure state than before; successful payments
+ * cannot be unwound by rollback.
+ *
+ * QPilot's docs page for this endpoint is essentially empty (no body
+ * spec, no preconditions, no documented errors). Treating it as a no-body
+ * POST until live testing surfaces a different shape.
+ *
+ * TODO(2026-06-07): no end-to-end smoke test yet — needs a SO in Failed
+ * status on a test site. Verify response shape, preconditions, and which
+ * fields actually change before relying on this in production. Tracked
+ * in the `retry-smoke-test-pending` memory entry.
+ *
+ * Rollback dispatcher routes `retry_scheduled_order` to rollbackRetry,
+ * which refuses every time — payment attempts can't be reversed via the
+ * API.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ */
+export async function retryScheduledOrder({ id }) {
+  return await auditedMutation({
+    toolName: "retry_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id },
+    fetchExisting: () =>
+      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: retryPath(id),
+          method: "POST",
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: RETRY_AUDIT_KEYS,
+  });
+}
+
+/**
  * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
  * UI) so we skip the audit/rollback layer entirely.
  *
@@ -559,7 +621,23 @@ async function rollbackUpdate(ctx) {
   if (tool === "safe_activate_scheduled_order") {
     return await rollbackSafeActivate(ctx);
   }
+  if (tool === "retry_scheduled_order") {
+    return await rollbackRetry(ctx);
+  }
   return await rollbackBodyUpdate(ctx);
+}
+
+/**
+ * Rollback for `retry_scheduled_order`. Always refuses: a Retry triggers a
+ * processing cycle that may have included a payment-gateway call, and
+ * those side effects cannot be reversed by an API call. The audit row
+ * still carries forensic intent and the captured field changes, but
+ * rollback_change is not a valid response to "I shouldn't have retried."
+ */
+async function rollbackRetry({ original }) {
+  throw new Error(
+    `Audit row ${original.id} cannot be rolled back: retry_scheduled_order triggers a processing cycle (payment-gateway side effects). Once attempted, the cycle cannot be reversed via the API. Investigate the resulting state in the QPilot UI and remediate manually if needed.`
+  );
 }
 
 async function rollbackBodyUpdate({ original, options, auditedMutation, markRolledBack }) {
@@ -808,4 +886,8 @@ function frequencyPath(id) {
 
 function safeActivatePath(id) {
   return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/SafeActivate`);
+}
+
+function retryPath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Retry`);
 }
