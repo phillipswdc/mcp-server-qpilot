@@ -1,8 +1,10 @@
 /**
  * Customers domain module — read-only for now.
  *
- * Mutations land later; for now we just expose the two reads the Python
- * version had: get-by-id and search.
+ * Reads: get-by-id, search, plus the four customer-scoped drill-down reads
+ * (scheduled orders, payment methods, metrics, event logs).
+ *
+ * Mutations land later.
  */
 import { qpilotRequest, sitePath } from "./client.js";
 import { withRetry } from "./retry.js";
@@ -58,6 +60,80 @@ export async function searchCustomers({
         page,
         pageSize: cappedSize,
       },
+    })
+  );
+}
+
+/**
+ * Fetch all payment methods on file for a customer. Returns a flat array
+ * — QPilot does not paginate this endpoint. Each item carries id, status,
+ * type (e.g. "Stripe"), expirationDate, lastFourDigits, isDefault, billing
+ * address fields, and gateway identifiers.
+ *
+ * @param {string|number} id
+ */
+export async function getCustomerPaymentMethods(id) {
+  return await withRetry(() =>
+    qpilotRequest({
+      path: sitePath(`/Customers/${encodeURIComponent(id)}/PaymentMethods`),
+    })
+  );
+}
+
+/**
+ * Fetch all scheduled orders belonging to a customer. Returns a flat array
+ * of full SO entities (same shape as get_scheduled_order). Optional
+ * `includeDeleted` flips QPilot's default of excluding soft-deleted orders.
+ *
+ * @param {object} params
+ * @param {string|number} params.id Customer id
+ * @param {boolean} [params.includeDeleted] When true, includes
+ *   soft-deleted SOs (status: Deleted). Defaults to QPilot's default
+ *   (excluded).
+ */
+export async function getCustomerScheduledOrders({ id, includeDeleted } = {}) {
+  return await withRetry(() =>
+    qpilotRequest({
+      path: sitePath(`/Customers/${encodeURIComponent(id)}/ScheduledOrders`),
+      query: includeDeleted ? { includeDeleted: true } : undefined,
+    })
+  );
+}
+
+/**
+ * Fetch QPilot's roll-up metrics for a customer: active/paused/failed/
+ * deleted SO counts and values, lifetime value, last successful and last
+ * failed processing cycle dates, etc. Returns a single object (not an
+ * array). Optional `excludeEventLogsData` skips the event-log-derived
+ * fields if you only need the counts (faster on customers with many events).
+ *
+ * @param {object} params
+ * @param {string|number} params.id Customer id
+ * @param {boolean} [params.excludeEventLogsData] Default false. When true,
+ *   QPilot omits the event-log-sourced fields from the response.
+ */
+export async function getCustomerMetrics({ id, excludeEventLogsData } = {}) {
+  return await withRetry(() =>
+    qpilotRequest({
+      path: sitePath(`/Customers/${encodeURIComponent(id)}/Metrics`),
+      query: excludeEventLogsData ? { excludeEventLogsData: true } : undefined,
+    })
+  );
+}
+
+/**
+ * Fetch the customer's event log. Returns a flat array of QPilot events
+ * (entityType, eventType, eventVerb, descriptionFormatted, originator info,
+ * etc.). Active customers can have hundreds of events — the SO 208022
+ * customer (id=107) has 352 — so callers should expect large responses
+ * and use the cache flag at the tool layer.
+ *
+ * @param {string|number} id Customer id
+ */
+export async function getCustomerEventLogs(id) {
+  return await withRetry(() =>
+    qpilotRequest({
+      path: sitePath(`/Customers/${encodeURIComponent(id)}/EventLogs`),
     })
   );
 }

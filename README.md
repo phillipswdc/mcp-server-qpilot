@@ -65,7 +65,7 @@ separate per site.
 
 ---
 
-## Tools (27)
+## Tools (31)
 
 ### Scheduled orders
 | Tool | Purpose | Audited |
@@ -95,6 +95,10 @@ separate per site.
 |---|---|
 | `get_customer` | Fetch by string id (e.g. `"107"`). The numeric `customerId` field 404s — use the `id` from list responses. |
 | `search_customers` | Free-text customer search |
+| `get_customer_payment_methods` | Flat array of PMs on file (id, type, lastFourDigits, isDefault, billing). Source of valid `payment_method_id` values for `change_scheduled_order_payment_method`. |
+| `get_customer_scheduled_orders` | Flat array of full SO entities owned by the customer. Replaces the unreliable `search_scheduled_orders + customerId filter` pattern. Optional `include_deleted`. |
+| `get_customer_metrics` | Single object: active/paused/failed/deleted counts and values, lifetime value, last cycle dates. Optional `exclude_event_logs_data` for speed. |
+| `get_customer_event_logs` | Flat array of QPilot events (eventType, eventVerb, originator, descriptionFormatted). ⚠️ Can be hundreds of items — pass `cache:true`. |
 
 ### Audit / rollback
 | Tool | Purpose |
