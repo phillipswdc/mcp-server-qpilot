@@ -13,7 +13,7 @@ in a site-specific SQLite file so the log can't bleed across tenants.
 ## Setup
 
 ### Requirements
-- Node 20+
+- Node 22+ (Node 20 reached end-of-life April 2026)
 - Read/write QPilot API credentials for one site
 
 ### Install
