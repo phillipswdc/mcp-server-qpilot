@@ -16,7 +16,7 @@
  */
 import { qpilotRequest, sitePath } from "./client.js";
 import { withRetry } from "./retry.js";
-import { auditedMutation } from "./_audit.js";
+import { auditedMutation, pickLastModifiedAt } from "./_audit.js";
 import { registerRollbackHandler } from "./audit.js";
 import { env } from "../config/env.js";
 import { DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT } from "../config/constants.js";
@@ -50,6 +50,20 @@ const SNOOZE_AUDIT_KEYS = [
 const NEXT_OCCURRENCE_AUDIT_KEYS = [
   "id",
   "nextOccurrenceUtc",
+  "status",
+  "isActive",
+];
+
+/**
+ * Properties captured on frequency audits. Both writable keys plus
+ * status/isActive for forensic context. Must include every key the
+ * frequency body can write, because rollback reads `args.properties` and
+ * pulls each prior value from `old_values`.
+ */
+const FREQUENCY_AUDIT_KEYS = [
+  "id",
+  "frequency",
+  "frequencyType",
   "status",
   "isActive",
 ];
@@ -416,6 +430,63 @@ export async function updateScheduledOrderNextOccurrence({
 }
 
 /**
+ * Change a scheduled order's recurrence frequency via QPilot's dedicated
+ * /Frequency endpoint. QPilot requires `frequencyType` in the body; we
+ * accept either or both fields and fill the omitted one from the existing
+ * record so callers only need to specify what they're changing. Rollback
+ * is scoped to the keys the caller actually set (rollbackBodyUpdate reads
+ * `args.properties`), so changing only the number won't revert the type.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {number} [params.frequency] Integer 1-365 (QPilot range)
+ * @param {string} [params.frequencyType] One of Days, Weeks, Months,
+ *   DayOfTheWeek, DayOfTheMonth
+ */
+export async function updateScheduledOrderFrequency({
+  id,
+  frequency,
+  frequencyType,
+}) {
+  if (frequency === undefined && frequencyType === undefined) {
+    throw new Error(
+      "update_scheduled_order_frequency requires at least one of `frequency` or `frequency_type`"
+    );
+  }
+
+  const path = orderPath(id);
+  const existing = await withRetry(() => qpilotRequest({ path }));
+
+  const properties = {};
+  if (frequency !== undefined) properties.frequency = frequency;
+  if (frequencyType !== undefined) properties.frequencyType = frequencyType;
+
+  const body = {
+    frequency: frequency ?? existing?.frequency,
+    frequencyType: frequencyType ?? existing?.frequencyType,
+  };
+
+  return await auditedMutation({
+    toolName: "update_scheduled_order_frequency",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: async () => existing,
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: frequencyPath(id),
+          method: "PUT",
+          body,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path }));
+    },
+    filterCapturedKeys: FREQUENCY_AUDIT_KEYS,
+  });
+}
+
+/**
  * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
  * UI) so we skip the audit/rollback layer entirely.
  *
@@ -550,6 +621,25 @@ async function rollbackStatusChange({ original, options, auditedMutation, markRo
 async function assertNoDrift({ original, options, keys, fetchCurrent }) {
   if (options?.force) return;
   const current = await withRetry(fetchCurrent);
+
+  // Coarse pre-check: QPilot's `updatedUtc` is the closest thing it exposes
+  // to an ETag. If it has advanced since our mutation recorded
+  // `last_modified_at`, something on the entity changed — even on a field
+  // we don't track in `filterCapturedKeys`. We catch that here before the
+  // narrow field-level comparison so side-band UI edits don't slip through.
+  // Skipped when either timestamp is missing (older audits won't have one).
+  const expectedLm = original.last_modified_at;
+  const currentLm = pickLastModifiedAt(current);
+  if (
+    Number.isFinite(expectedLm) &&
+    Number.isFinite(currentLm) &&
+    expectedLm !== currentLm
+  ) {
+    throw new Error(
+      `Drift detected on audit_id ${original.id}: entity updatedUtc has advanced from ${new Date(expectedLm).toISOString()} (recorded) to ${new Date(currentLm).toISOString()} (live). Something modified the entity after this mutation. Pass force: true to override.`
+    );
+  }
+
   const expected = original.new_values ?? {};
   const drift = [];
   for (const k of keys) {
@@ -591,4 +681,8 @@ function snoozePath(id) {
 
 function nextOccurrencePath(id) {
   return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/NextOccurrenceUtc`);
+}
+
+function frequencyPath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Frequency`);
 }

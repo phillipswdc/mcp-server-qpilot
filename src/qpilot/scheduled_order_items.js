@@ -11,7 +11,7 @@
  */
 import { qpilotRequest, sitePath } from "./client.js";
 import { withRetry } from "./retry.js";
-import { auditedMutation } from "./_audit.js";
+import { auditedMutation, pickLastModifiedAt } from "./_audit.js";
 import { registerRollbackHandler } from "./audit.js";
 
 const OBJECT_TYPE = "scheduled_order_items";
@@ -98,6 +98,19 @@ async function rollbackItemUpdate({ original, options, auditedMutation, markRoll
 
   if (!options?.force) {
     const current = await withRetry(() => qpilotRequest({ path }));
+
+    const expectedLm = original.last_modified_at;
+    const currentLm = pickLastModifiedAt(current);
+    if (
+      Number.isFinite(expectedLm) &&
+      Number.isFinite(currentLm) &&
+      expectedLm !== currentLm
+    ) {
+      throw new Error(
+        `Drift detected on audit_id ${original.id}: item updatedUtc has advanced from ${new Date(expectedLm).toISOString()} (recorded) to ${new Date(currentLm).toISOString()} (live). Something modified the item after this mutation. Pass force: true to override.`
+      );
+    }
+
     const expected = original.new_values ?? {};
     const drift = [];
     for (const k of keysToRevert) {

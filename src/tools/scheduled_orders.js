@@ -14,6 +14,7 @@ import {
   changeScheduledOrderStatus,
   snoozeScheduledOrder,
   updateScheduledOrderNextOccurrence,
+  updateScheduledOrderFrequency,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
@@ -235,6 +236,41 @@ export function registerScheduledOrderTools(server) {
         const out = await updateScheduledOrderNextOccurrence({
           id,
           nextOccurrenceUtc: next_occurrence_utc,
+        });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "update_scheduled_order_frequency",
+    "Change a scheduled order's recurrence frequency via QPilot's dedicated PUT .../Frequency endpoint. Surgical single-purpose update — avoids the full merge-body PUT used by update_scheduled_order. Accepts `frequency` (integer 1-365) and/or `frequency_type` (Days, Weeks, Months, DayOfTheWeek, DayOfTheMonth); at least one is required. QPilot's endpoint requires both in the body, so any omitted field is filled from the existing record before sending. CONSTRAINTS (QPilot will 400 otherwise): the order status must NOT be Processing or Deleted; the order must not be in its lock window. Audited and rollback-capable — rollback restores only the field(s) the caller actually set, via the generic PUT path.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      frequency: z
+        .number()
+        .int()
+        .min(1)
+        .max(365)
+        .optional()
+        .describe("Recurrence interval count. Integer 1-365. Omit to keep current value (frequency_type must then be provided)."),
+      frequency_type: z
+        .enum(["Days", "Weeks", "Months", "DayOfTheWeek", "DayOfTheMonth"])
+        .optional()
+        .describe("Recurrence unit. Omit to keep current value (frequency must then be provided)."),
+    },
+    async ({ id, frequency, frequency_type }) => {
+      try {
+        const out = await updateScheduledOrderFrequency({
+          id,
+          frequency,
+          frequencyType: frequency_type,
         });
         return jsonText({
           audit_id: out.audit_id,
