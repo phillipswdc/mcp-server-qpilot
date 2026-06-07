@@ -17,6 +17,7 @@ import {
   updateScheduledOrderFrequency,
   safeActivateScheduledOrder,
   retryScheduledOrder,
+  changeScheduledOrderPaymentMethod,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
@@ -322,6 +323,33 @@ export function registerScheduledOrderTools(server) {
     async ({ id }) => {
       try {
         const out = await retryScheduledOrder({ id });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "change_scheduled_order_payment_method",
+    "Change which payment method backs a scheduled order via QPilot's dedicated PATCH .../PaymentMethod endpoint. Caller supplies the target QPilot int64 paymentMethodId; the embedded paymentMethod object on the SO is QPilot-resolved from the id. CONSTRAINTS (QPilot will 400 otherwise): the payment method must already exist on the site (error: 'Payment method does not exist'); the order status must NOT be Processing or Deleted; the order must not be in its lock window. Discovering the right paymentMethodId: until get_customer_payment_methods ships (roadmap step 2), callers need to know the id out of band — typically from the QPilot UI or from the SO's current `paymentMethodId` field. Audited and rollback-able via the generic PUT path; rollback restores the prior paymentMethodId.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      payment_method_id: z
+        .number()
+        .int()
+        .describe("QPilot's int64 payment method id to assign. Must already exist on the site."),
+    },
+    async ({ id, payment_method_id }) => {
+      try {
+        const out = await changeScheduledOrderPaymentMethod({
+          id,
+          paymentMethodId: payment_method_id,
+        });
         return jsonText({
           audit_id: out.audit_id,
           changed_fields: out.changed_fields,

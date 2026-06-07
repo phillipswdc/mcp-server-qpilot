@@ -87,6 +87,19 @@ const RETRY_AUDIT_KEYS = [
 ];
 
 /**
+ * Properties captured on payment-method-change audits. Single writable key
+ * (paymentMethodId) plus status/isActive for forensic context. The
+ * embedded `paymentMethod` object on the entity is QPilot-resolved from
+ * the id, so we don't track it directly.
+ */
+const PAYMENT_METHOD_AUDIT_KEYS = [
+  "id",
+  "paymentMethodId",
+  "status",
+  "isActive",
+];
+
+/**
  * Fetch a single scheduled order by id.
  * @param {string|number} id
  * @returns {Promise<object>}
@@ -592,6 +605,56 @@ export async function retryScheduledOrder({ id }) {
 }
 
 /**
+ * Change which payment method backs a scheduled order via QPilot's dedicated
+ * PATCH .../PaymentMethod endpoint. The target payment method must already
+ * exist on the site (QPilot 400s with "Payment method does not exist"
+ * otherwise). QPilot's docs don't explicitly require the payment method to
+ * belong to the SO's customer, but that's the operational expectation —
+ * verify behavior empirically the first time you cross-link.
+ *
+ * Rollback routes through the default `rollbackBodyUpdate` (generic PUT)
+ * because `paymentMethodId` is not in PUT_STRIP_KEYS — the generic PUT can
+ * write the prior scalar back. No dedicated handler needed.
+ *
+ * TODO(2026-06-07): no end-to-end smoke test yet — needs a second valid
+ * paymentMethodId on site 1113 to swap SO 208022 between. Verify the
+ * happy-path PATCH, the rollback via generic PUT, and confirm whether
+ * QPilot enforces customer-ownership of the payment method. Tracked in
+ * the `payment_method_smoke_test_pending` memory entry.
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {number} params.paymentMethodId QPilot's numeric payment method id
+ *   (int64). Discover via /Sites/{siteId}/PaymentMethods or via the
+ *   customer's PaymentMethods endpoint (not yet exposed as a tool — see
+ *   roadmap step 2).
+ */
+export async function changeScheduledOrderPaymentMethod({ id, paymentMethodId }) {
+  const path = orderPath(id);
+  const existing = await withRetry(() => qpilotRequest({ path }));
+  const properties = { paymentMethodId };
+
+  return await auditedMutation({
+    toolName: "change_scheduled_order_payment_method",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, properties },
+    fetchExisting: async () => existing,
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: paymentMethodPath(id),
+          method: "PATCH",
+          body: properties,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path }));
+    },
+    filterCapturedKeys: PAYMENT_METHOD_AUDIT_KEYS,
+  });
+}
+
+/**
  * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
  * UI) so we skip the audit/rollback layer entirely.
  *
@@ -890,4 +953,8 @@ function safeActivatePath(id) {
 
 function retryPath(id) {
   return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Retry`);
+}
+
+function paymentMethodPath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/PaymentMethod`);
 }
