@@ -487,6 +487,49 @@ export async function updateScheduledOrderFrequency({
 }
 
 /**
+ * "Safely" reactivate a scheduled order via QPilot's dedicated /SafeActivate
+ * endpoint. Distinct from `change_scheduled_order_status` because that route
+ * only accepts Active/Paused transitions — Failed orders need this path to
+ * get back to Active, and soft-deleted orders need this path with
+ * allowDeleted=true. QPilot runs its own safety checks (lock window etc.)
+ * before flipping status.
+ *
+ * Audit captures status/isActive via STATUS_AUDIT_KEYS so the rollback
+ * dispatcher can route based on prior status. Rollback support:
+ *   - prior Paused → revert via status endpoint
+ *   - prior Deleted → re-soft-delete via DELETE
+ *   - prior Active → "nothing to roll back" (state didn't change)
+ *   - prior Failed (or anything else) → refused; the API has no path back
+ *
+ * @param {object} params
+ * @param {string|number} params.id
+ * @param {boolean} [params.allowDeleted=false] When true, also accepts
+ *   orders currently in Deleted (soft-deleted) status. Default behavior
+ *   400s on Deleted orders.
+ */
+export async function safeActivateScheduledOrder({ id, allowDeleted = false }) {
+  return await auditedMutation({
+    toolName: "safe_activate_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { id, allowDeleted },
+    fetchExisting: () =>
+      withRetry(() => qpilotRequest({ path: orderPath(id) })),
+    perform: async () => {
+      await withRetry(() =>
+        qpilotRequest({
+          path: safeActivatePath(id),
+          method: "PUT",
+          query: allowDeleted ? { allowDeleted: true } : undefined,
+        })
+      );
+      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
+    },
+    filterCapturedKeys: STATUS_AUDIT_KEYS,
+  });
+}
+
+/**
  * Delete a scheduled order. QPilot soft-deletes (recoverable from the QPilot
  * UI) so we skip the audit/rollback layer entirely.
  *
@@ -503,18 +546,19 @@ export async function deleteScheduledOrder(id) {
 // ---------------------------------------------------------------------------
 
 /**
- * Both `update_scheduled_order` and `change_scheduled_order_status` are
- * recorded as `operation: "update"`, so we register a single handler for
- * (scheduled_orders, update) and dispatch by `tool_name`.
+ * All scheduled-order mutations are recorded as `operation: "update"`, so we
+ * register a single handler for (scheduled_orders, update) and dispatch by
+ * `tool_name`. Default path is body-based PUT rollback (snooze, next-
+ * occurrence, frequency, and update_scheduled_order all funnel here).
  */
 async function rollbackUpdate(ctx) {
   const tool = ctx.original.tool_name;
   if (tool === "change_scheduled_order_status") {
     return await rollbackStatusChange(ctx);
   }
-  // Default: body-based PUT rollback. Used by `update_scheduled_order` and
-  // any future tool that records its mutations via auditedMutation with an
-  // `args.properties` shape.
+  if (tool === "safe_activate_scheduled_order") {
+    return await rollbackSafeActivate(ctx);
+  }
   return await rollbackBodyUpdate(ctx);
 }
 
@@ -615,6 +659,81 @@ async function rollbackStatusChange({ original, options, auditedMutation, markRo
 }
 
 /**
+ * Rollback for `safe_activate_scheduled_order`. SafeActivate transitions an
+ * order to Active (or Paused, depending on QPilot's internal logic), so the
+ * inverse depends on what the prior status was. We dispatch by old_values:
+ *
+ *   - "Paused" → PUT .../status/Paused (mirrors rollbackStatusChange)
+ *   - "Deleted" → DELETE (re-soft-delete via the same path the delete tool uses)
+ *   - "Active" → refuse: the original SafeActivate didn't change status, so
+ *     there is nothing to revert
+ *   - anything else (notably "Failed"): refuse with a clear message — QPilot's
+ *     status endpoint only accepts Active/Paused, so Failed isn't reachable
+ *     via the API. Operator has to manually intervene in the QPilot UI.
+ */
+async function rollbackSafeActivate({ original, options, auditedMutation, markRolledBack }) {
+  const id = original.object_id;
+  const oldStatus = original.old_values?.status;
+  if (!oldStatus) {
+    throw new Error(
+      `Audit row ${original.id} has no captured old_values.status — cannot determine SafeActivate rollback target`
+    );
+  }
+  if (oldStatus === "Active") {
+    throw new Error(
+      `Audit row ${original.id}: original status was already "Active" before SafeActivate — nothing to roll back.`
+    );
+  }
+  if (oldStatus !== "Paused" && oldStatus !== "Deleted") {
+    throw new Error(
+      `Rolling back SafeActivate when the original status was "${oldStatus}" is not supported via the API — QPilot's status endpoint only accepts Active or Paused, and there is no path back to ${oldStatus}. Restore manually in the QPilot UI.`
+    );
+  }
+
+  const getPath = orderPath(id);
+
+  await assertNoDrift({
+    original,
+    options,
+    keys: ["status"],
+    fetchCurrent: () => qpilotRequest({ path: getPath }),
+  });
+
+  const performFn =
+    oldStatus === "Paused"
+      ? async () => {
+          await withRetry(() =>
+            qpilotRequest({ path: statusPath(id, "Paused"), method: "PUT" })
+          );
+          return await withRetry(() => qpilotRequest({ path: getPath }));
+        }
+      : async () => {
+          await withRetry(() =>
+            qpilotRequest({ path: getPath, method: "DELETE" })
+          );
+          return await withRetry(() => qpilotRequest({ path: getPath }));
+        };
+
+  const { audit_id } = await auditedMutation({
+    toolName: "rollback_change",
+    objectType: OBJECT_TYPE,
+    operation: "update",
+    args: { rolled_back_audit_id: Number(original.id), target_status: oldStatus },
+    fetchExisting: () => withRetry(() => qpilotRequest({ path: getPath })),
+    perform: performFn,
+    filterCapturedKeys: STATUS_AUDIT_KEYS,
+    rollbackAuditId: Number(original.id),
+  });
+
+  markRolledBack(Number(original.id), audit_id);
+  return {
+    original_audit_id: Number(original.id),
+    rollback_audit_id: audit_id,
+    reverted_status: oldStatus,
+  };
+}
+
+/**
  * Compare current state to what the audit row recorded as `new_values` and
  * abort if any tracked key has drifted. `options.force` skips the check.
  */
@@ -685,4 +804,8 @@ function nextOccurrencePath(id) {
 
 function frequencyPath(id) {
   return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/Frequency`);
+}
+
+function safeActivatePath(id) {
+  return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}/SafeActivate`);
 }

@@ -15,6 +15,7 @@ import {
   snoozeScheduledOrder,
   updateScheduledOrderNextOccurrence,
   updateScheduledOrderFrequency,
+  safeActivateScheduledOrder,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
@@ -271,6 +272,34 @@ export function registerScheduledOrderTools(server) {
           id,
           frequency,
           frequencyType: frequency_type,
+        });
+        return jsonText({
+          audit_id: out.audit_id,
+          changed_fields: out.changed_fields,
+          result: out.result,
+        });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "safe_activate_scheduled_order",
+    "Reactivate a scheduled order via QPilot's dedicated PUT .../SafeActivate endpoint. Distinct from change_scheduled_order_status because that route only accepts Active/Paused transitions — Failed and Snoozed orders need this path to get back to Active, and soft-deleted orders need this path with allow_deleted=true to be restored. QPilot runs its own safety checks (lock window etc.) before flipping status. CONSTRAINTS (QPilot will 400 otherwise): the order status MUST be Failed, Paused, or Snoozed (Active orders are refused with code 1001 'Can only activate Scheduled Orders with statuses $Failed, $Paused or $Snoozed'); if status is Deleted, allow_deleted must be true (Deleted is then also accepted); the order must NOT be in Processing or its lock window. Audited and rollback-capable for Paused→Active (revert via status endpoint) and Deleted→Active (revert via DELETE) transitions. Failed→Active rollback is refused with a clear message — QPilot's status endpoint won't accept Failed as a target, so restore manually in the QPilot UI if needed.",
+    {
+      id: z.string().describe("Scheduled order id."),
+      allow_deleted: z
+        .boolean()
+        .optional()
+        .default(false)
+        .describe("When true, allow reviving an order currently in Deleted (soft-deleted) status. Default false — the endpoint 400s on Deleted orders without this flag."),
+    },
+    async ({ id, allow_deleted }) => {
+      try {
+        const out = await safeActivateScheduledOrder({
+          id,
+          allowDeleted: allow_deleted,
         });
         return jsonText({
           audit_id: out.audit_id,
