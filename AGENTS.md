@@ -6,6 +6,14 @@ These instructions apply to every AI coding agent working in this repository.
 
 Write production-quality code that is secure, maintainable, testable, and easy for humans to review. Prefer boring, proven solutions over clever abstractions.
 
+## Project Memory
+
+This repository is an MCP server wrapping the QPilot API. Many behaviors of that API are not in its public reference — they were discovered through live probing and recorded as project memory.
+
+If your agent host loads a project memory file (Claude Code stores it at `~/.claude/projects/<project-slug>/memory/MEMORY.md`), **read the index there before assuming the QPilot API or this codebase behaves as documented elsewhere**. Memory entries are keyed by topic — start with anything matching `qpilot_*` when touching QPilot integration code.
+
+If memory is not available to your session, do not assume the public QPilot reference is complete. Prefer live probing over assumption — QPilot's documented routes routinely omit error codes (e.g. snooze 1010 for missing site feature flag), reject formats the reference does not warn about (precision-strict timestamps), and have status-transition constraints not listed anywhere. When you discover such a behavior, capture it in `CONTRIBUTING.md`, a commit body, or the project's eventual `docs/qpilot-quirks.md` so the next agent does not re-discover it.
+
 ## Required Behavior
 
 - Read the surrounding code before editing.

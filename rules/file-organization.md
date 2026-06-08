@@ -46,6 +46,22 @@ When an exception is intentional, add a short note near the top of the file or i
 - Tests: match the file under test when possible, such as `billing-service.test.ts`.
 - Fixtures: include the behavior or scenario, such as `expired-session.fixture.ts`.
 
+### Community-convention exceptions
+
+The Markdown `kebab-case.md` rule does not apply to files whose uppercase name is a widely recognized community convention that tooling and humans expect at the repository root. Use these names exactly as written:
+
+- `README.md`
+- `AGENTS.md`
+- `CLAUDE.md`
+- `CONTRIBUTING.md`
+- `CHANGELOG.md`
+- `CODE_OF_CONDUCT.md`
+- `SECURITY.md`
+- `LICENSE` (no extension by convention)
+- `NOTICE`
+
+These names are how agent tools, package registries, GitHub, and contributors discover the files. Renaming them to kebab-case would break discovery.
+
 ## Module Boundaries
 
 - Keep feature code close to the feature.
