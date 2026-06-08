@@ -111,6 +111,15 @@ playbook.
 | `get_customer_metrics` | Single object: active/paused/failed/deleted counts and values, lifetime value, last cycle dates. Optional `exclude_event_logs_data` for speed. |
 | `get_customer_event_logs` | Flat array of QPilot events (eventType, eventVerb, originator, descriptionFormatted). ⚠️ Can be hundreds of items — pass `cache:true`. |
 
+### Processing diagnostics
+Three pure-GET tools that pair with `retry_scheduled_order` — investigate what QPilot's pipeline actually did before retrying blind.
+
+| Tool | Purpose |
+|---|---|
+| `list_scheduled_order_processing_cycles` | List cycles for one SO. Filter by status (Processing / Success / Failed / Retry / Void). Pass `cache:true` for filtering via `query_cache`. |
+| `get_processing_cycle` | Fetch one cycle by id. Ids surface as `lastProcessingCycleId` on the SO or in the list above. |
+| `get_processing_cycle_logs` | QPilot's diagnostic log entries for one cycle — the canonical place to look when a cycle ended Failed. |
+
 ### Audit / rollback
 | Tool | Purpose |
 |---|---|
