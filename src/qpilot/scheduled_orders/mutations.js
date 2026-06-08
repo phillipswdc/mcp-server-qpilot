@@ -354,9 +354,9 @@ export async function retryScheduledOrder({ id }) {
  * @param {object} params
  * @param {string|number} params.id
  * @param {number} params.paymentMethodId QPilot's numeric payment method id
- *   (int64). Discover via /Sites/{siteId}/PaymentMethods or via the
- *   customer's PaymentMethods endpoint (not yet exposed as a tool — see
- *   roadmap step 2).
+ *   (int64). Discover via the `get_customer_payment_methods` tool (the
+ *   `id` field on each returned payment method) or via
+ *   /Sites/{siteId}/PaymentMethods directly.
  */
 export async function changeScheduledOrderPaymentMethod({ id, paymentMethodId }) {
   const path = orderPath(id);

@@ -207,8 +207,9 @@ or is it part of the persisted entity?* Computed/relational → add to
 - **Generic PUT rejects status changes.** Don't try to set `status` via
   `update_scheduled_order` — use `change_scheduled_order_status`.
 - **Soft-deleted orders reject all PUTs.** Once `lastChangeToDeleted` is
-  set, both the body PUT and `/status/{value}` 400. Restoration needs a
-  `safeactivate` endpoint that isn't wired yet.
+  set, both the body PUT and `/status/{value}` 400. Restore via
+  `safe_activate_scheduled_order` with `allow_deleted: true` — that
+  endpoint accepts soft-deleted orders specifically.
 - **`get_customer` takes the string `id`, not `customerId`.** Use the value
   from `customer.id` in list responses (e.g. `"107"`). The numeric
   `customerId` 404s.
@@ -223,14 +224,23 @@ or is it part of the persisted entity?* Computed/relational → add to
 - **No hot-reload.** This is a stdio MCP server started as a child process
   by your MCP client. Changes to source files take effect only after the
   client restarts the server (typically: quit and relaunch the client).
-- **No customer mutations.** Only `get_customer` and `search_customers` are
-  exposed; customer writes haven't been wired.
-- **No targeted scheduled-order endpoints yet.** Snooze, frequency,
-  nextOccurrenceUtc, paymentMethod, switchCustomer, safeActivate, and retry
-  all have dedicated QPilot routes that would avoid the merge-body PUT cost.
-  Currently you'd express those through `update_scheduled_order`.
+- **Customer surface is read-only.** Six customer read tools are exposed
+  (`get_customer`, `search_customers`, `get_customer_payment_methods`,
+  `get_customer_scheduled_orders`, `get_customer_metrics`,
+  `get_customer_event_logs`). Customer-entity writes (create / update /
+  delete) are not wired — use the QPilot UI for those.
+- **A few QPilot endpoints remain unimplemented.** Notably:
+  `EstimatedDeliveryDate`, `RetryUpdateOrder`, and the customer
+  `SwitchCustomer` flow on scheduled orders. Design notes for each are
+  captured in project memory under `deferred_endpoints` for pickup when
+  prioritized.
 - **One site per process.** Multi-site setups need one server registration
   per site, each with its own `QPILOT_SITE_ID`.
+- **Two tools shipped without live smoke tests.** `retry_scheduled_order`
+  (needs a Failed SO; triggers real payment-gateway side effects on a
+  successful retry) and `change_scheduled_order_payment_method` (needs a
+  second valid payment method on the test site). Both are flagged in
+  their tool descriptions and tracked as open issues.
 
 ---
 
@@ -238,26 +248,40 @@ or is it part of the persisted entity?* Computed/relational → add to
 
 ```
 src/
-  index.js                  # MCP entrypoint
+  index.js                       # MCP entrypoint
   config/
-    env.js                  # Loads + validates env, generates session_id
-    constants.js            # Limits, supported types, cache TTLs
+    env.js                       # Loads + validates env, generates session_id
+    constants.js                 # Limits, supported types, cache TTLs
   qpilot/
-    client.js               # HTTP client, auth, path helpers
-    retry.js                # Backoff for 429 / 5xx
-    _audit.js               # auditedMutation wrapper
-    audit.js                # Rollback dispatcher + audit-domain methods
-    _cache.js               # Auto-overflow + opt-in caching helpers
-    cache.js                # Cache-domain methods
-    scheduled_orders.js     # SO reads + audited mutations + rollback handlers
+    client.js                    # HTTP client, auth, path helpers
+    retry.js                     # Backoff for 429 / 5xx
+    _audit.js                    # auditedMutation wrapper
+    audit.js                     # Rollback dispatcher + audit-domain methods
+    _cache.js                    # Auto-overflow + opt-in caching helpers
+    cache.js                     # Cache-domain methods
+    scheduled_orders.js          # Barrel — re-exports the split below
+    scheduled_orders/
+      constants.js               # OBJECT_TYPE + per-mutation AUDIT_KEYS
+      paths.js                   # URL builders per endpoint
+      helpers.js                 # mergeForPut, matchTimestampPrecision, …
+      reads.js                   # getById, search, history
+      mutations.js               # 9 audited mutation functions
+      rollback.js                # Dispatcher + handlers + drift guard
     scheduled_order_items.js
     customers.js
   tools/
-    *.js                    # Thin MCP-tool wrappers around the qpilot/ layer
+    *.js                         # Thin MCP-tool wrappers around the qpilot/ layer
   db/
-    index.js                # SQLite singleton (per-site file)
-    schema.js               # Tables: audit_log, result_cache
-    queries/                # Typed query helpers
+    index.js                     # SQLite singleton (per-site file)
+    schema.js                    # Tables: audit_log, result_cache
+    queries/                     # Typed query helpers
+test/
+  _helpers/test-env.js           # Sets test env + resetTestDb()
+  qpilot/                        # Mirrors src/qpilot/
+  tools/                         # Mirrors src/tools/
+rules/                           # AI agent + contributor coding rules
+AGENTS.md / CLAUDE.md            # Agent-facing entry points (CLAUDE.md @-imports AGENTS.md)
+CONTRIBUTING.md                  # Branching, commits, verification, mutation safety
 data/
-  qpilot-site-<id>.db       # Audit log + cache, per site
+  qpilot-site-<id>.db            # Audit log + cache, per site (gitignored)
 ```
