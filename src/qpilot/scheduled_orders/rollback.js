@@ -221,8 +221,10 @@ async function rollbackSafeActivate({ original, options, auditedMutation, markRo
 /**
  * Compare current state to what the audit row recorded as `new_values` and
  * abort if any tracked key has drifted. `options.force` skips the check.
+ *
+ * Exported for tests. Internal to rollback dispatch otherwise.
  */
-async function assertNoDrift({ original, options, keys, fetchCurrent }) {
+export async function assertNoDrift({ original, options, keys, fetchCurrent }) {
   if (options?.force) return;
   const current = await withRetry(fetchCurrent);
 

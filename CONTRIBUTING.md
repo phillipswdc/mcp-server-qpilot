@@ -132,6 +132,43 @@ git push origin v0.x.0
   the host client after source changes.
 - Per-site SQLite files live in `data/qpilot-site-<id>.db` and are gitignored.
 
+## Verification
+
+Run these before pushing a branch:
+
+```
+npm run check    # syntax check across src/ and test/
+npm test         # full test suite
+```
+
+`npm run check` uses `node --check` per file — no lint config, just
+catches syntax errors. `npm test` uses Node's built-in test runner
+(`node --test`) — zero new dependencies.
+
+Tests live under `test/`, mirroring the source tree
+(`test/qpilot/...`, `test/tools/...`). Each test file imports
+`test/_helpers/test-env.js` at the top to set the QPILOT_* env vars
+to deterministic test values before any other module loads. Tests
+that touch SQLite use the isolated `data/qpilot-site-test.db` file
+and call `resetTestDb()` in a `beforeEach` hook so each test starts
+clean.
+
+When adding a new mutation tool, add at minimum:
+
+- A unit test for any pure helper extracted from the mutation
+  (date coercion, body merging, body validation, etc.).
+- An `auditedMutation` flow test if the mutation uses a non-trivial
+  `filterCapturedKeys` shape or a custom `extractObjectId` /
+  `extractLastModifiedAt` callback.
+- A drift test (`assertNoDrift` is exported from
+  `src/qpilot/scheduled_orders/rollback.js` for this purpose) if the
+  rollback path has interesting precondition logic.
+
+Live smoke testing against real QPilot remains the canonical
+end-to-end verification for new mutation tools. The unit/integration
+tests cover the audit and rollback plumbing — they do not replace a
+live smoke test.
+
 ## QPilot reference discipline
 
 Before adding or changing any QPilot HTTP call, fetch the specific endpoint's

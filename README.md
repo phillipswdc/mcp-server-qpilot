@@ -63,6 +63,17 @@ Change `QPILOT_SITE_ID` in `.env` and restart the client. A new
 `data/qpilot-site-<id>.db` file is created automatically — audit history stays
 separate per site.
 
+### Verification
+
+```bash
+npm test          # full test suite (Node's built-in node --test)
+npm run check     # syntax check across src/ and test/
+```
+
+Tests use Node 22+'s built-in test runner — no test framework
+dependencies. See `CONTRIBUTING.md` § *Verification* for the test-writing
+playbook.
+
 ---
 
 ## Tools (31)
