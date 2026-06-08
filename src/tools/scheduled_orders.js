@@ -336,7 +336,7 @@ export function registerScheduledOrderTools(server) {
 
   server.tool(
     "change_scheduled_order_payment_method",
-    "Change which payment method backs a scheduled order via QPilot's dedicated PATCH .../PaymentMethod endpoint. Caller supplies the target QPilot int64 paymentMethodId; the embedded paymentMethod object on the SO is QPilot-resolved from the id. CONSTRAINTS (QPilot will 400 otherwise): the payment method must already exist on the site (error: 'Payment method does not exist'); the order status must NOT be Processing or Deleted; the order must not be in its lock window. Discovering the right paymentMethodId: until get_customer_payment_methods ships (roadmap step 2), callers need to know the id out of band — typically from the QPilot UI or from the SO's current `paymentMethodId` field. Audited and rollback-able via the generic PUT path; rollback restores the prior paymentMethodId.",
+    "Change which payment method backs a scheduled order via QPilot's dedicated PATCH .../PaymentMethod endpoint. Caller supplies the target QPilot int64 paymentMethodId; the embedded paymentMethod object on the SO is QPilot-resolved from the id. CONSTRAINTS (QPilot will 400 otherwise): the payment method must already exist on the site (error: 'Payment method does not exist'); the order status must NOT be Processing or Deleted; the order must not be in its lock window. To discover valid `payment_method_id` values for the order's customer, call `get_customer_payment_methods` first (each item's `id` is the int to pass here). Audited and rollback-able via the generic PUT path; rollback restores the prior paymentMethodId.",
     {
       id: z.string().describe("Scheduled order id."),
       payment_method_id: z
