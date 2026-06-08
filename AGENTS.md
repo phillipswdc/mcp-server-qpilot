@@ -20,6 +20,8 @@ Branching, commit-message format, scope vocabulary (`so`, `customers`, `chore`, 
 
 The mutation safety rule there (every write to QPilot routes through `auditedMutation` or has a documented reason it does not) is enforced at PR review; landing a non-audited mutation without justification is a blocker.
 
+When adding, modifying, or reviewing an MCP tool, read [`rules/mcp-tools.md`](rules/mcp-tools.md). It codifies the project's tool-naming convention, description structure, zod `.describe()` discipline, audit routing, rollback registration, smoke-test marking, and response shape — concerns the generic rules in [`rules/code-quality.md`](rules/code-quality.md) etc. do not cover.
+
 ## Required Behavior
 
 - Read the surrounding code before editing.
