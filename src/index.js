@@ -28,6 +28,7 @@ const { registerCacheTools } = await import("./tools/cache.js");
 const { registerScheduledOrderTools } = await import("./tools/scheduled_orders.js");
 const { registerScheduledOrderItemTools } = await import("./tools/scheduled_order_items.js");
 const { registerCustomerTools } = await import("./tools/customers.js");
+const { registerProcessingCycleTools } = await import("./tools/processing_cycles.js");
 
 const server = new McpServer({
   name: "qpilot",
@@ -39,6 +40,7 @@ registerCacheTools(server);
 registerScheduledOrderTools(server);
 registerScheduledOrderItemTools(server);
 registerCustomerTools(server);
+registerProcessingCycleTools(server);
 
 await server.connect(new StdioServerTransport());
 
