@@ -316,9 +316,14 @@ export function registerScheduledOrderTools(server) {
 
   server.tool(
     "retry_scheduled_order",
-    "Retry processing for a scheduled order via QPilot's dedicated POST .../Retry endpoint. ⚠️ HIGH-IMPACT: this triggers a real processing cycle, which almost certainly includes a payment-gateway call. Use only on orders that genuinely need a retry (typically status `Failed`). QPilot's docs page for this endpoint is sparse — preconditions, body shape, and error codes are NOT documented, so expect to learn empirically from QPilot's 4xx responses on first uses. NOT rollback-able: payment attempts cannot be reversed via the API. The audit row captures status / nextOccurrenceUtc / lastOccurrenceUtc / lastProcessingCycleId / failure-reason fields for forensic traceability, but `rollback_change` will refuse with a clear message. END-TO-END SMOKE TEST PENDING: this tool has not yet been validated against a real Failed order — first production use is the test.",
+    "Retry processing for a scheduled order via QPilot's dedicated POST .../Retry endpoint. ⚠️ HIGH-IMPACT: this triggers a real processing cycle, which almost certainly includes a payment-gateway call. Use only on orders that genuinely need a retry (typically status `Failed`). QPilot's docs page for this endpoint is sparse — preconditions, body shape, and error codes are NOT documented, so expect to learn empirically from QPilot's 4xx responses on first uses. NOT rollback-able: payment attempts cannot be reversed via the API. The audit row captures status / nextOccurrenceUtc / lastOccurrenceUtc / lastProcessingCycleId / failure-reason fields for forensic traceability, but `rollback_change` will refuse with a clear message. END-TO-END SMOKE TEST PENDING: this tool has not yet been validated against a real Failed order — first production use is the test. GATE: requires `confirm_payment_impact: true` to invoke; schema validation rejects calls without it so the tool can't be triggered by passing just an id.",
     {
       id: z.string().describe("Scheduled order id. Typically in status Failed (the canonical retryable case)."),
+      confirm_payment_impact: z
+        .literal(true)
+        .describe(
+          "Must be exactly `true`. Acknowledges that this call may trigger a real payment-gateway charge that cannot be undone by `rollback_change`. Required to prevent accidental invocation — supplying just an id is rejected at schema validation."
+        ),
     },
     async ({ id }) => {
       try {
