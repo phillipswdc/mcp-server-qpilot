@@ -13,7 +13,7 @@
 - Keep functions short enough to understand without scrolling.
 - Give each function one clear responsibility.
 - Prefer early returns when they reduce nesting.
-- Avoid boolean parameters that radically change behavior.
+- Avoid boolean parameters that radically change behavior. Exception: when wrapping a third-party API that exposes a boolean toggle for the same effect, mirror the API surface. For example, `safe_activate_scheduled_order(allow_deleted: boolean)` mirrors QPilot's `allowDeleted` query parameter; introducing a separate `safe_activate_deleted_scheduled_order` tool would diverge from the upstream contract for no gain.
 - Avoid hidden side effects in functions that appear to be pure.
 - Do not use broad catch-all utilities as dumping grounds.
 

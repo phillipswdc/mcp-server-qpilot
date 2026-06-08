@@ -28,14 +28,6 @@
 - Escape output for the target context.
 - Avoid unsafe deserialization.
 
-## Web Security
-
-- Use secure cookies for session data.
-- Protect state-changing requests from CSRF where applicable.
-- Keep CORS narrow.
-- Use a restrictive Content Security Policy when the project supports it.
-- Do not store sensitive tokens in browser-accessible persistent storage unless there is a clear security design.
-
 ## Logging
 
 - Log enough context to debug failures.
