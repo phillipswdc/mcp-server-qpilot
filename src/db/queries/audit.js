@@ -11,16 +11,16 @@ const INSERT = db.prepare(`
   INSERT INTO audit_log
     (timestamp, scope, session_id, tool_name, object_type, object_id, operation,
      old_values, new_values, changed_fields, args,
-     success, error, last_modified_at, rolled_back, rollback_audit_id)
+     success, error, post_state_error, last_modified_at, rolled_back, rollback_audit_id)
   VALUES
-    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+    (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
 `);
 
 const SELECT_BY_ID = db.prepare(`SELECT * FROM audit_log WHERE id = ?`);
 
 const SELECT_RECENT = db.prepare(`
   SELECT id, timestamp, scope, tool_name, object_type, object_id,
-         operation, success, rolled_back, error
+         operation, success, rolled_back, error, post_state_error
   FROM audit_log
   ORDER BY id DESC
   LIMIT ? OFFSET ?
@@ -28,7 +28,7 @@ const SELECT_RECENT = db.prepare(`
 
 const SELECT_RECENT_FILTERED = db.prepare(`
   SELECT id, timestamp, scope, session_id, tool_name, object_type, object_id,
-         operation, success, rolled_back, error
+         operation, success, rolled_back, error, post_state_error
   FROM audit_log
   WHERE (@object_type IS NULL OR object_type = @object_type)
     AND (@object_id IS NULL OR object_id = @object_id)
@@ -71,8 +71,12 @@ const COUNT_FILTERED = db.prepare(`
  * @property {object|null} new_values Snapshot after the change
  * @property {string[]|null} changed_fields Property names that actually differed
  * @property {object} args Original tool arguments, for forensics
- * @property {boolean} success Did the underlying API call succeed?
- * @property {string|null} error Error message when !success
+ * @property {boolean} success Did the write succeed? (Independent of whether the
+ *   post-write refetch that captures new_values also succeeded — see post_state_error.)
+ * @property {string|null} error Error message when the write failed (!success)
+ * @property {string|null} post_state_error Error message when the write
+ *   succeeded but the post-write refetch failed. When set, success=1 and
+ *   new_values=null; drift detection is unavailable for this row.
  * @property {number|null} last_modified_at Unix-ms drift signal for rollback
  * @property {number|null} rollback_audit_id If this row IS a rollback, the original audit id it reverses
  */
@@ -97,6 +101,7 @@ export function insertAudit(row) {
     JSON.stringify(row.args ?? {}),
     row.success ? 1 : 0,
     row.error ?? null,
+    row.post_state_error ?? null,
     row.last_modified_at ?? null,
     row.rollback_audit_id ?? null
   );

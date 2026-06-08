@@ -46,8 +46,8 @@ export async function updateScheduledOrderItem({ id, properties }) {
       await withRetry(() =>
         qpilotRequest({ path, method: "PUT", body: properties })
       );
-      return await withRetry(() => qpilotRequest({ path }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path })),
     filterCapturedKeys: filterKeys,
   });
 }
@@ -142,8 +142,8 @@ async function rollbackItemUpdate({ original, options, auditedMutation, markRoll
     fetchExisting: () => withRetry(() => qpilotRequest({ path })),
     perform: async () => {
       await withRetry(() => qpilotRequest({ path, method: "PUT", body: propsToWrite }));
-      return await withRetry(() => qpilotRequest({ path }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path })),
     filterCapturedKeys: keysToRevert,
     rollbackAuditId: Number(original.id),
   });
