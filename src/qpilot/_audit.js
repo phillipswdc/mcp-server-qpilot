@@ -4,10 +4,17 @@
  * Every create/update/delete-style mutation flows through `auditedMutation`
  * so that:
  *   1. Existing state is captured before the change (old_values).
- *   2. The mutation runs, even if it fails.
- *   3. The new state (or null for deletes) is captured after success.
+ *   2. The write runs, even if it fails.
+ *   3. The new state (or null for deletes) is captured after the write.
  *   4. Changed fields are diffed for updates.
  *   5. An audit_log row is inserted with success/error context.
+ *
+ * Write and post-state capture are tracked separately. QPilot writes can
+ * succeed while the follow-up GET that captures new_values fails (5xx,
+ * timeout, etc.). Conflating them would mark a real mutation as failed and
+ * lock out rollback. Callers split the two phases via `perform` (the write)
+ * and `capturePostState` (the refetch). `success` reflects the write only;
+ * `post_state_error` records a refetch failure independently.
  *
  * Tools never call this directly — domain modules wrap their mutations with it.
  */
@@ -22,9 +29,17 @@ import { insertAudit } from "../db/queries/audit.js";
  * @property {object} args Original tool args (forensic record)
  * @property {() => Promise<object|null>} fetchExisting Returns the entity's
  *   current state (or null for a fresh create). Called once before `perform`.
- * @property {() => Promise<object|null>} perform Executes the mutation; resolves
- *   to the new state of the entity (or null for hard deletes that have no
- *   post-state).
+ * @property {() => Promise<object|null>} perform Executes the write. When
+ *   `capturePostState` is also provided, `perform`'s return value is ignored
+ *   and the new state comes from `capturePostState`. Otherwise the return
+ *   value is treated as the new state (back-compat shape — for writes whose
+ *   response body is the entity, e.g. POST creates).
+ * @property {() => Promise<object|null>} [capturePostState] Optional refetch
+ *   callback invoked only when `perform` resolves. A throw here records the
+ *   row as success=1 with `post_state_error` set and new_values=null. The
+ *   caller still sees the throw (forensic visibility); rollback of the row
+ *   remains possible but requires `force: true` because drift detection has
+ *   no baseline to compare against.
  * @property {string[]} [filterCapturedKeys] When provided, the stored
  *   old_values and new_values are filtered to only these keys. Keeps audit
  *   rows lean — captures explicit intent without noisy auto-included fields.
@@ -51,6 +66,7 @@ export async function auditedMutation({
   args,
   fetchExisting,
   perform,
+  capturePostState,
   filterCapturedKeys = null,
   extractObjectId,
   extractLastModifiedAt,
@@ -58,18 +74,33 @@ export async function auditedMutation({
 }) {
   const fullOld = await safeFetch(fetchExisting);
 
-  let result = null;
-  let error = null;
-  let success = false;
-
+  // Phase 1: the write. If this throws, the mutation did not land in QPilot.
+  let writeResult = null;
+  let writeError = null;
+  let writeSuccess = false;
   try {
-    result = await perform();
-    success = true;
+    writeResult = await perform();
+    writeSuccess = true;
   } catch (err) {
-    error = err;
+    writeError = err;
   }
 
-  const fullNew = success ? result : null;
+  // Phase 2: post-state capture. Only invoked when the write succeeded.
+  // A throw here means QPilot has the mutation but we couldn't snapshot
+  // the result — recorded distinctly via post_state_error so the row
+  // stays rollback-eligible (with force).
+  let postState = writeResult;
+  let postStateError = null;
+  if (writeSuccess && capturePostState) {
+    try {
+      postState = await capturePostState();
+    } catch (err) {
+      postStateError = err;
+      postState = null;
+    }
+  }
+
+  const fullNew = writeSuccess ? postState : null;
 
   const old_values = applyKeyFilter(fullOld, filterCapturedKeys);
   const new_values = applyKeyFilter(fullNew, filterCapturedKeys);
@@ -80,13 +111,13 @@ export async function auditedMutation({
       : null;
 
   const objectId =
-    (extractObjectId ? extractObjectId(result ?? fullOld) : null) ??
-    pickId(result) ??
+    (extractObjectId ? extractObjectId(postState ?? fullOld) : null) ??
+    pickId(postState) ??
     pickId(fullOld);
 
   const lastModifiedAt = extractLastModifiedAt
-    ? extractLastModifiedAt(result)
-    : pickLastModifiedAt(result);
+    ? extractLastModifiedAt(postState)
+    : pickLastModifiedAt(postState);
 
   const audit_id = insertAudit({
     scope: env.scope,
@@ -99,19 +130,28 @@ export async function auditedMutation({
     new_values,
     changed_fields,
     args,
-    success,
-    error: error ? String(error?.message ?? error) : null,
+    success: writeSuccess,
+    error: writeError ? String(writeError?.message ?? writeError) : null,
+    post_state_error: postStateError
+      ? String(postStateError?.message ?? postStateError)
+      : null,
     last_modified_at: lastModifiedAt ?? null,
     rollback_audit_id: rollbackAuditId,
   });
 
-  if (!success) {
-    throw Object.assign(error ?? new Error("QPilot mutation failed"), {
+  if (!writeSuccess) {
+    throw Object.assign(writeError ?? new Error("QPilot mutation failed"), {
       audit_id,
     });
   }
+  if (postStateError) {
+    throw Object.assign(postStateError, {
+      audit_id,
+      post_state_capture: true,
+    });
+  }
 
-  return { result, audit_id, changed_fields };
+  return { result: postState, audit_id, changed_fields };
 }
 
 function pickId(obj) {

@@ -79,6 +79,14 @@ export async function rollbackChange(originalAuditId, options = {}) {
     throw new Error(
       `Audit row ${originalAuditId} was recorded in scope "${original.scope}", but current scope is "${env.scope}". Repoint QPILOT_SITE_ID to roll it back.`
     );
+  // Partial-state row: the QPilot write succeeded but the follow-up GET that
+  // would have captured new_values failed. We have old_values + args, which is
+  // enough to attempt a rollback, but drift detection has no baseline. Refuse
+  // unless the caller acknowledges the gap with force: true.
+  if (original.post_state_error && !options?.force)
+    throw new Error(
+      `Audit row ${originalAuditId} has no captured post-state (the QPilot write succeeded but the follow-up refetch failed: ${original.post_state_error}). Drift detection cannot run for this row. Pass force: true to roll back using old_values without drift checks.`
+    );
 
   const key = handlerKey(original.object_type, original.operation);
   const handler = rollbackHandlers.get(key);

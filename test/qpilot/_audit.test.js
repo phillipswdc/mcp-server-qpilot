@@ -259,6 +259,111 @@ describe("auditedMutation failure path", () => {
   });
 });
 
+describe("auditedMutation post-state capture failure", () => {
+  beforeEach(async () => {
+    await resetTestDb();
+  });
+
+  test("write OK + capturePostState throws: success=1, post_state_error captured, new_values=null", async () => {
+    const postBoom = new Error("refetch 503");
+    let thrown;
+    try {
+      await auditedMutation({
+        toolName: "update_scheduled_order",
+        objectType: "scheduled_orders",
+        operation: "update",
+        args: { id: 1, properties: { frequency: 14 } },
+        fetchExisting: async () => ({ id: 1, frequency: 7, status: "Active" }),
+        perform: async () => {
+          /* write OK; returns nothing — capturePostState owns post-state */
+        },
+        capturePostState: async () => {
+          throw postBoom;
+        },
+        filterCapturedKeys: ["id", "frequency"],
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown, "expected the post-state failure to throw to the caller");
+    assert.equal(thrown, postBoom, "same error instance is re-thrown");
+    assert.equal(thrown.post_state_capture, true);
+    assert.ok(Number.isInteger(thrown.audit_id));
+    const row = getAuditById(thrown.audit_id);
+    assert.equal(row.success, true);
+    assert.equal(row.error, null);
+    assert.equal(row.post_state_error, "refetch 503");
+    assert.equal(row.new_values, null);
+    assert.equal(row.changed_fields, null);
+    // old_values is still captured — that's what makes force-rollback viable.
+    assert.equal(row.old_values.frequency, 7);
+  });
+
+  test("write OK + capturePostState OK: success=1, post_state_error=null, new_values populated", async () => {
+    const out = await auditedMutation({
+      toolName: "update_scheduled_order",
+      objectType: "scheduled_orders",
+      operation: "update",
+      args: { id: 1, properties: { frequency: 14 } },
+      fetchExisting: async () => ({ id: 1, frequency: 7, status: "Active" }),
+      perform: async () => {
+        /* write OK */
+      },
+      capturePostState: async () => ({ id: 1, frequency: 14, status: "Active" }),
+    });
+    const row = getAuditById(out.audit_id);
+    assert.equal(row.success, true);
+    assert.equal(row.error, null);
+    assert.equal(row.post_state_error, null);
+    assert.equal(row.new_values.frequency, 14);
+  });
+
+  test("write fails: capturePostState is not invoked even if provided", async () => {
+    let postCalled = false;
+    let thrown;
+    try {
+      await auditedMutation({
+        toolName: "update_scheduled_order",
+        objectType: "scheduled_orders",
+        operation: "update",
+        args: { id: 1, properties: { frequency: 14 } },
+        fetchExisting: async () => ({ id: 1, frequency: 7 }),
+        perform: async () => {
+          throw new Error("write 400");
+        },
+        capturePostState: async () => {
+          postCalled = true;
+          return {};
+        },
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown);
+    assert.equal(postCalled, false);
+    const row = getAuditById(thrown.audit_id);
+    assert.equal(row.success, false);
+    assert.equal(row.error, "write 400");
+    assert.equal(row.post_state_error, null);
+  });
+
+  test("back-compat: no capturePostState means perform's return value is the new state", async () => {
+    const out = await auditedMutation({
+      toolName: "create_item",
+      objectType: "scheduled_order_items",
+      operation: "create",
+      args: {},
+      fetchExisting: async () => null,
+      perform: async () => ({ id: 7, sku: "ABC" }),
+    });
+    const row = getAuditById(out.audit_id);
+    assert.equal(row.success, true);
+    assert.equal(row.post_state_error, null);
+    assert.equal(row.new_values.id, 7);
+    assert.equal(row.new_values.sku, "ABC");
+  });
+});
+
 describe("pickLastModifiedAt", () => {
   test("prefers updatedUtc when present", () => {
     const ms = pickLastModifiedAt({

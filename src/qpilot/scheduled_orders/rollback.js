@@ -85,8 +85,8 @@ async function rollbackBodyUpdate({ original, options, auditedMutation, markRoll
     fetchExisting: async () => current,
     perform: async () => {
       await withRetry(() => qpilotRequest({ path, method: "PUT", body }));
-      return await withRetry(() => qpilotRequest({ path }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path })),
     filterCapturedKeys: keysToRevert,
     rollbackAuditId: Number(original.id),
   });
@@ -129,8 +129,8 @@ async function rollbackStatusChange({ original, options, auditedMutation, markRo
     fetchExisting: () => withRetry(() => qpilotRequest({ path: getPath })),
     perform: async () => {
       await withRetry(() => qpilotRequest({ path: setPath, method: "PUT" }));
-      return await withRetry(() => qpilotRequest({ path: getPath }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path: getPath })),
     filterCapturedKeys: STATUS_AUDIT_KEYS,
     rollbackAuditId: Number(original.id),
   });
@@ -190,13 +190,11 @@ async function rollbackSafeActivate({ original, options, auditedMutation, markRo
           await withRetry(() =>
             qpilotRequest({ path: statusPath(id, "Paused"), method: "PUT" })
           );
-          return await withRetry(() => qpilotRequest({ path: getPath }));
         }
       : async () => {
           await withRetry(() =>
             qpilotRequest({ path: getPath, method: "DELETE" })
           );
-          return await withRetry(() => qpilotRequest({ path: getPath }));
         };
 
   const { audit_id } = await auditedMutation({
@@ -206,6 +204,7 @@ async function rollbackSafeActivate({ original, options, auditedMutation, markRo
     args: { rolled_back_audit_id: Number(original.id), target_status: oldStatus },
     fetchExisting: () => withRetry(() => qpilotRequest({ path: getPath })),
     perform: performFn,
+    capturePostState: () => withRetry(() => qpilotRequest({ path: getPath })),
     filterCapturedKeys: STATUS_AUDIT_KEYS,
     rollbackAuditId: Number(original.id),
   });

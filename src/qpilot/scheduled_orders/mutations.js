@@ -59,11 +59,9 @@ export async function updateScheduledOrder({ id, properties }) {
     args: { id, properties },
     fetchExisting: async () => existing,
     perform: async () => {
-      await withRetry(() =>
-        qpilotRequest({ path, method: "PUT", body })
-      );
-      return await withRetry(() => qpilotRequest({ path }));
+      await withRetry(() => qpilotRequest({ path, method: "PUT", body }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path })),
     filterCapturedKeys: filterKeys,
   });
 }
@@ -87,8 +85,8 @@ export async function changeScheduledOrderStatus({ id, status }) {
       await withRetry(() =>
         qpilotRequest({ path: statusPath(id, status), method: "PUT" })
       );
-      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path: orderPath(id) })),
     filterCapturedKeys: STATUS_AUDIT_KEYS,
   });
 }
@@ -136,8 +134,8 @@ export async function snoozeScheduledOrder({
           body: properties,
         })
       );
-      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path: orderPath(id) })),
     filterCapturedKeys: SNOOZE_AUDIT_KEYS,
   });
 }
@@ -183,8 +181,8 @@ export async function updateScheduledOrderNextOccurrence({
           body: properties,
         })
       );
-      return await withRetry(() => qpilotRequest({ path }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path })),
     filterCapturedKeys: NEXT_OCCURRENCE_AUDIT_KEYS,
   });
 }
@@ -240,8 +238,8 @@ export async function updateScheduledOrderFrequency({
           body,
         })
       );
-      return await withRetry(() => qpilotRequest({ path }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path })),
     filterCapturedKeys: FREQUENCY_AUDIT_KEYS,
   });
 }
@@ -283,8 +281,8 @@ export async function safeActivateScheduledOrder({ id, allowDeleted = false }) {
           query: allowDeleted ? { allowDeleted: true } : undefined,
         })
       );
-      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path: orderPath(id) })),
     filterCapturedKeys: STATUS_AUDIT_KEYS,
   });
 }
@@ -327,8 +325,8 @@ export async function retryScheduledOrder({ id }) {
           method: "POST",
         })
       );
-      return await withRetry(() => qpilotRequest({ path: orderPath(id) }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path: orderPath(id) })),
     filterCapturedKeys: RETRY_AUDIT_KEYS,
   });
 }
@@ -377,8 +375,8 @@ export async function changeScheduledOrderPaymentMethod({ id, paymentMethodId })
           body: properties,
         })
       );
-      return await withRetry(() => qpilotRequest({ path }));
     },
+    capturePostState: () => withRetry(() => qpilotRequest({ path })),
     filterCapturedKeys: PAYMENT_METHOD_AUDIT_KEYS,
   });
 }

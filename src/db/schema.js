@@ -21,6 +21,7 @@ const DDL = `
     args TEXT,
     success INTEGER NOT NULL CHECK (success IN (0,1)),
     error TEXT,
+    post_state_error TEXT,
     last_modified_at INTEGER,
     rolled_back INTEGER NOT NULL DEFAULT 0 CHECK (rolled_back IN (0,1)),
     rolled_back_at INTEGER,
@@ -59,6 +60,9 @@ const DDL = `
  */
 export function applySchema(database) {
   database.exec(DDL);
+  // Pre-existing audit_log tables predate the post_state_error column.
+  // Add it in place so old site DBs upgrade on startup.
+  addColumnIfNotExists(database, "audit_log", "post_state_error", "TEXT");
 }
 
 /**
@@ -74,5 +78,14 @@ export function applySchema(database) {
 export function addColumnIfNotExists(db, table, column, typeAndConstraints) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all();
   if (cols.some((c) => c.name === column)) return;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeAndConstraints}`);
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${typeAndConstraints}`);
+  } catch (err) {
+    // Race-safe: parallel processes opening the same DB (e.g. node --test
+    // running test files in parallel) can both pass the PRAGMA check and
+    // then both attempt the ALTER. SQLite reports the loser with
+    // "duplicate column name" — treat as success since the column now
+    // exists. Any other error propagates.
+    if (!/duplicate column name/i.test(String(err?.message ?? err))) throw err;
+  }
 }
