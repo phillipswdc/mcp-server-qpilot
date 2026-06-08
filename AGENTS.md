@@ -14,6 +14,12 @@ If your agent host loads a project memory file (Claude Code stores it at `~/.cla
 
 If memory is not available to your session, do not assume the public QPilot reference is complete. Prefer live probing over assumption — QPilot's documented routes routinely omit error codes (e.g. snooze 1010 for missing site feature flag), reject formats the reference does not warn about (precision-strict timestamps), and have status-transition constraints not listed anywhere. When you discover such a behavior, capture it in `CONTRIBUTING.md`, a commit body, or the project's eventual `docs/qpilot-quirks.md` so the next agent does not re-discover it.
 
+## Repository Conventions
+
+Branching, commit-message format, scope vocabulary (`so`, `customers`, `chore`, …), merge style, and PR-description requirements are defined in [`CONTRIBUTING.md`](CONTRIBUTING.md). Read it before your first commit on this repository — the conventions there are project-specific and not derivable from generic best practice.
+
+The mutation safety rule there (every write to QPilot routes through `auditedMutation` or has a documented reason it does not) is enforced at PR review; landing a non-audited mutation without justification is a blocker.
+
 ## Required Behavior
 
 - Read the surrounding code before editing.
@@ -32,6 +38,7 @@ If memory is not available to your session, do not assume the public QPilot refe
 - Do not add dependencies without a clear need and project-compatible license.
 - Do not create files that grow beyond 400 lines unless there is a documented reason.
 - Do not perform large unrelated refactors while solving a narrow task.
+- Do not add AI-generated co-author or attribution trailers to commit messages. No `Co-Authored-By: Claude ...`, no `🤖 Generated with [Claude Code]`, no equivalent from any other AI tool. See `CONTRIBUTING.md` § *No AI-generated trailers* for the full rule and rationale.
 
 ## File Size Rule
 

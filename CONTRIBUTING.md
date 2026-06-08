@@ -50,10 +50,25 @@ Conventional Commits format:
 <optional body: what changed and the WHY that isn't obvious from the diff>
 ```
 
-One logical change per commit. No trailing co-author footers. The commit body
-is for the reasoning a future reader will need — hidden constraints,
-QPilot quirks the change works around, why a particular approach was chosen
-over the obvious alternative.
+One logical change per commit. The commit body is for the reasoning a future
+reader will need — hidden constraints, QPilot quirks the change works around,
+why a particular approach was chosen over the obvious alternative.
+
+### No AI-generated trailers
+
+Commit messages on this repository must not contain AI-generated co-author
+or attribution trailers. Specifically:
+
+- No `Co-Authored-By: Claude ...` lines.
+- No `Co-Authored-By: <any AI model> ...` lines.
+- No `🤖 Generated with [Claude Code](https://claude.com/claude-code)` or any
+  other AI-tool attribution footer.
+- No "Generated with" / "Authored by" footers naming an AI tool.
+
+The commit author is the human contributor. If an AI assistant helped write
+the change, that fact lives in the PR description (if at all), not in the
+permanent git history. This rule has been broken before and required a
+history rewrite to fix — keep it clean the first time.
 
 ## Mutation safety rule
 
@@ -71,9 +86,16 @@ up there or have a reason it doesn't.
 
 ## Pull requests
 
-Squash-merge into `main`. The squash subject becomes the canonical commit
-subject; the squash body becomes the canonical commit body. Both are the
-permanent record — keep them clean.
+Merge with **"Create a merge commit"** (GitHub UI default) — not squash,
+not rebase. This preserves the original feature-branch commit SHAs as the
+parent of the merge commit, which keeps `git log --first-parent main`
+readable as a series of PR merges while `git log` shows the individual
+feature commits with their original hashes. Audit-bound projects need that
+SHA preservation: rolling back to a specific feature state means
+referencing a stable, never-rewritten hash.
+
+The feature-branch commits themselves are the permanent record — keep
+each one clean per the commit-message rules above.
 
 PR description should cover:
 
