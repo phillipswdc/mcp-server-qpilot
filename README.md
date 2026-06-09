@@ -76,12 +76,14 @@ playbook.
 
 ---
 
-## Tools (31)
+## Tools (34)
+
+Read tools that surface `processingErrorCode` (single SO, processing-cycle reads, etc.) are auto-enriched with `processingErrorCodeName` and `processingErrorCodeMeaning` so you don't have to memorize the numeric codes. See [`docs/qpilot-error-codes.md`](docs/qpilot-error-codes.md) for the full Layer 1 catalog (11 codes) and links to per-gateway codes when a payment fails.
 
 ### Scheduled orders
 | Tool | Purpose | Audited |
 |---|---|---|
-| `get_scheduled_order` | Fetch one SO | — |
+| `get_scheduled_order` | Fetch one SO (auto-annotates `processingErrorCode`) | — |
 | `search_scheduled_orders` | v3 list (page, statuses, search, orderBy) | — |
 | `get_scheduled_order_history` | QPilot's `/ScheduledOrdersHistory` (date range) | — |
 | `update_scheduled_order` | Partial update via merge-body PUT | ✅ rollback-able |
