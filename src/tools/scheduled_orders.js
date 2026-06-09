@@ -21,19 +21,21 @@ import {
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
+import { annotateProcessingErrorCode } from "../qpilot/processing_failure_codes.js";
 import { jsonText, errorText, statusOf, normalizeListResponse } from "./_shared.js";
 
 /** @param {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer} server */
 export function registerScheduledOrderTools(server) {
   server.tool(
     "get_scheduled_order",
-    "Fetch a single scheduled order by id from QPilot.",
+    "Fetch a single scheduled order by id from QPilot. When the order has a processingErrorCode, the response is enriched with processingErrorCodeName and processingErrorCodeMeaning (resolved from QPilot's 11-code failure catalog — see docs/qpilot-error-codes.md).",
     {
       id: z.string().describe("Scheduled order id."),
     },
     async ({ id }) => {
       try {
-        return jsonText(await getScheduledOrderById(id));
+        const so = await getScheduledOrderById(id);
+        return jsonText(annotateProcessingErrorCode(so));
       } catch (err) {
         return errorText(err, statusOf(err));
       }

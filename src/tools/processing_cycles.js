@@ -15,6 +15,7 @@ import {
   getProcessingCycleLogs,
 } from "../qpilot/processing_cycles.js";
 import { maybeCacheResponse } from "../qpilot/_cache.js";
+import { annotateProcessingErrorCode } from "../qpilot/processing_failure_codes.js";
 import { jsonText, errorText, statusOf, normalizeListResponse } from "./_shared.js";
 
 /** @param {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer} server */
@@ -53,7 +54,7 @@ export function registerProcessingCycleTools(server) {
           page,
           pageSize: page_size,
         });
-        const normalized = normalizeListResponse(raw);
+        const normalized = annotateProcessingErrorCode(normalizeListResponse(raw));
         const out = maybeCacheResponse(normalized, {
           useCache: cache === true,
           toolName: "list_scheduled_order_processing_cycles",
@@ -75,7 +76,8 @@ export function registerProcessingCycleTools(server) {
     },
     async ({ cycle_id }) => {
       try {
-        return jsonText(await getProcessingCycleById(cycle_id));
+        const cycle = await getProcessingCycleById(cycle_id);
+        return jsonText(annotateProcessingErrorCode(cycle));
       } catch (err) {
         return errorText(err, statusOf(err));
       }
@@ -90,7 +92,8 @@ export function registerProcessingCycleTools(server) {
     },
     async ({ cycle_id }) => {
       try {
-        return jsonText(await getProcessingCycleLogs(cycle_id));
+        const logs = await getProcessingCycleLogs(cycle_id);
+        return jsonText(annotateProcessingErrorCode(logs));
       } catch (err) {
         return errorText(err, statusOf(err));
       }
