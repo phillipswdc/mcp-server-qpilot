@@ -20,7 +20,11 @@ import {
   changeScheduledOrderPaymentMethod,
   deleteScheduledOrder,
 } from "../qpilot/scheduled_orders.js";
-import { maybeCacheResponse } from "../qpilot/_cache.js";
+import {
+  maybeCacheResponse,
+  newRollingCacheId,
+  upsertRollingResultSet,
+} from "../qpilot/_cache.js";
 import { annotateProcessingErrorCode } from "../qpilot/processing_failure_codes.js";
 import { jsonText, errorText, statusOf, normalizeListResponse } from "./_shared.js";
 
@@ -89,6 +93,102 @@ export function registerScheduledOrderTools(server) {
         return jsonText(out, { toolName: "search_scheduled_orders" });
       } catch (err) {
         return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "sync_all_scheduled_orders",
+    "Paginate through EVERY scheduled order matching the given filters, stitch the pages into one result set, and stash it in result_cache under a single handle. One call in, one cache_id out — use query_cache to slice. Prefer this over looping search_scheduled_orders(cache:true) manually. Ephemeral: the cache row expires per RESULT_CACHE_TTL_MS.",
+    {
+      statuses: z
+        .array(z.string())
+        .optional()
+        .describe("Status filter (e.g. ['Active']). Omit for all statuses. Multiple values combine with OR."),
+      search: z
+        .string()
+        .optional()
+        .describe("Free-text search across QPilot's default searchable fields."),
+      order_by: z.string().optional().describe("Sort field. QPilot default is 'NextOccurrenceUtc'."),
+      order: z.enum(["asc", "desc"]).optional(),
+      page_size: z
+        .number()
+        .int()
+        .min(1)
+        .max(200)
+        .optional()
+        .default(200)
+        .describe("QPilot v3 max is 200; keep the default unless you have a reason."),
+      max_pages: z
+        .number()
+        .int()
+        .min(1)
+        .max(2000)
+        .optional()
+        .default(1000)
+        .describe("Safety cap so a runaway loop can't hammer QPilot. 1000 * 200 = 200k orders."),
+    },
+    async ({ statuses, search, order_by, order, page_size, max_pages }) => {
+      const cacheId = newRollingCacheId();
+      const sourceArgs = { statuses, search, order_by, order, page_size };
+      const all = [];
+      let page = 1;
+      let lastBatchSize = 0;
+      let lastHandle = null;
+      try {
+        while (page <= max_pages) {
+          const raw = await searchScheduledOrders({
+            page,
+            pageSize: page_size,
+            statusNames: statuses,
+            search,
+            orderBy: order_by,
+            order,
+          });
+          const normalized = normalizeListResponse(raw);
+          const batch = normalized.results ?? [];
+          all.push(...batch);
+          lastBatchSize = batch.length;
+          // Persist after every page so a crash/cancel mid-loop still leaves
+          // the accumulated snapshot recoverable via query_cache(cache_id).
+          lastHandle = upsertRollingResultSet({
+            cacheId,
+            toolName: "sync_all_scheduled_orders",
+            sourceArgs,
+            objectType: "scheduled_orders",
+            results: all,
+          });
+          if (lastBatchSize < page_size) break;
+          page += 1;
+        }
+        const hitPageCap = page >= max_pages && lastBatchSize === page_size;
+        return jsonText(
+          {
+            cache_id: cacheId,
+            cache_type: "result_set",
+            object_type: "scheduled_orders",
+            total: all.length,
+            pages_fetched: page,
+            hit_page_cap: hitPageCap,
+            expires_at_iso: new Date(lastHandle.expires_at).toISOString(),
+            byte_length: lastHandle.byte_length,
+            sample: all.slice(0, 5),
+            next_steps:
+              "Use query_cache(cache_id) to filter/sort/paginate.",
+          },
+          { toolName: "sync_all_scheduled_orders" }
+        );
+      } catch (err) {
+        // Even on partial failure, the last successful upsert is already
+        // durable — return the handle so the caller can pick up the pieces.
+        return errorText(
+          Object.assign(new Error(err?.message ?? String(err)), {
+            partial_cache_id: cacheId,
+            pages_completed: page - 1,
+            rows_captured: all.length,
+          }),
+          statusOf(err)
+        );
       }
     }
   );

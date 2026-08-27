@@ -14,6 +14,7 @@
  * Audit storage NEVER routes through caching — audit_log captures full
  * values for forensics and rollback fidelity.
  */
+import { randomUUID } from "node:crypto";
 import {
   insertCache,
   newCacheId,
@@ -69,6 +70,57 @@ export function cacheResultSet({
     session_id: env.sessionId,
   });
 
+  return { cache_id: cacheId, expires_at: expiresAt, byte_length: byteLength };
+}
+
+/**
+ * Mint a stable, non-content-addressed cache_id for a bulk sync that will
+ * grow over multiple writes. Use with `upsertRollingResultSet` when the same
+ * handle must survive N accumulating writes (page-by-page pagination), since
+ * `cacheResultSet` derives its id from payload content and would change on
+ * every write.
+ */
+export function newRollingCacheId() {
+  return `rc_bulk_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+}
+
+/**
+ * INSERT OR REPLACE a result-set row under a caller-supplied stable cache_id.
+ * TTL is refreshed on each call so a long sync can't self-expire mid-loop.
+ *
+ * @param {object} params
+ * @param {string} params.cacheId Stable id (mint via newRollingCacheId).
+ * @param {string} params.toolName
+ * @param {object} params.sourceArgs
+ * @param {string} params.objectType
+ * @param {object[]} params.results Accumulated array so far.
+ * @param {number} [params.ttlMs]
+ */
+export function upsertRollingResultSet({
+  cacheId,
+  toolName,
+  sourceArgs,
+  objectType,
+  results,
+  ttlMs = RESULT_CACHE_TTL_MS,
+}) {
+  const payload = JSON.stringify(results);
+  const byteLength = Buffer.byteLength(payload, "utf8");
+  const expiresAt = Date.now() + ttlMs;
+  insertCache({
+    cache_id: cacheId,
+    cache_type: "result_set",
+    tool_name: toolName,
+    source_args: sourceArgs,
+    object_type: objectType,
+    payload,
+    result_count: results.length,
+    byte_length: byteLength,
+    preview: null,
+    expires_at: expiresAt,
+    scope: env.scope,
+    session_id: env.sessionId,
+  });
   return { cache_id: cacheId, expires_at: expiresAt, byte_length: byteLength };
 }
 
