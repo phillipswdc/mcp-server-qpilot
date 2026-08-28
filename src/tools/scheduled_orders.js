@@ -179,14 +179,24 @@ export function registerScheduledOrderTools(server) {
         }
       }
 
-      let page = resume_from_page ?? 1;
+      // firstPage = first page number we will fetch on THIS call.
+      // lastPageFetched = highest page we actually completed. Starts at
+      // firstPage - 1 so "pages_fetched_this_call" is 0 before any fetch.
+      const firstPage = resume_from_page ?? 1;
+      let lastPageFetched = firstPage - 1;
       let lastBatchSize = 0;
       let lastHandle = null;
       let hitTimeBudget = false;
+      let pageInFlight = firstPage; // for error reporting only
+      // Populated from the first response we see (this call OR a prior call
+      // that already stashed it — we re-derive it from page 1 either way).
+      let totalCount = null;
+      let totalPagesFromServer = null;
       try {
-        while (page <= max_pages) {
+        for (let nextPage = firstPage; nextPage <= max_pages; nextPage++) {
+          pageInFlight = nextPage;
           const raw = await listScheduledOrders({
-            page,
+            page: nextPage,
             pageSize: page_size,
             customerId: customer_id,
             statusNames: statuses,
@@ -194,10 +204,18 @@ export function registerScheduledOrderTools(server) {
             orderBy: order_by,
             order,
           });
+          // Capture QPilot's counts from the envelope BEFORE normalize strips
+          // most non-candidate keys. Response shape:
+          // { items: [...], totalCount: N, totalPages: M }
+          if (totalCount == null && raw && typeof raw === "object") {
+            if (typeof raw.totalCount === "number") totalCount = raw.totalCount;
+            if (typeof raw.totalPages === "number") totalPagesFromServer = raw.totalPages;
+          }
           const normalized = normalizeListResponse(raw);
           const batch = normalized.results ?? [];
           all.push(...batch);
           lastBatchSize = batch.length;
+          lastPageFetched = nextPage;
           lastHandle = upsertRollingResultSet({
             cacheId,
             toolName: "sync_all_scheduled_orders",
@@ -205,30 +223,49 @@ export function registerScheduledOrderTools(server) {
             objectType: "scheduled_orders",
             results: all,
           });
-          if (lastBatchSize < page_size) break; // natural end
-          page += 1;
+          // Termination signals (whichever fires first):
+          //   1. QPilot told us totalPages and we've reached it.
+          //   2. This page came back short (< page_size) — last page.
+          //   3. Time budget exhausted.
+          //   4. Absolute max_pages cap (checked via for-loop bound).
+          const reachedTotalPages =
+            totalPagesFromServer != null && lastPageFetched >= totalPagesFromServer;
+          if (reachedTotalPages) break;
+          if (lastBatchSize < page_size) break;
           if (Date.now() >= deadline) {
             hitTimeBudget = true;
             break;
           }
         }
-        const naturallyDone = lastBatchSize < page_size;
-        const hitPageCap = page >= max_pages && lastBatchSize === page_size;
+        const naturallyDone =
+          (totalPagesFromServer != null && lastPageFetched >= totalPagesFromServer) ||
+          lastBatchSize < page_size;
+        const hitPageCap =
+          !hitTimeBudget && !naturallyDone && lastPageFetched >= max_pages;
         const finished = naturallyDone || hitPageCap;
+        const pagesFetchedThisCall =
+          lastPageFetched >= firstPage ? lastPageFetched - firstPage + 1 : 0;
+        const pagesRemaining =
+          finished || totalPagesFromServer == null
+            ? null
+            : Math.max(0, totalPagesFromServer - lastPageFetched);
         return jsonText(
           {
             cache_id: cacheId,
             cache_type: "result_set",
             object_type: "scheduled_orders",
             total: all.length,
-            pages_fetched_this_call: page - (resume_from_page ?? 1) + (lastBatchSize > 0 ? 1 : 0),
-            last_page_fetched: page,
+            total_expected: totalCount,
+            total_pages_expected: totalPagesFromServer,
+            pages_fetched_this_call: pagesFetchedThisCall,
+            last_page_fetched: lastPageFetched,
+            pages_remaining: pagesRemaining,
             finished,
             hit_page_cap: hitPageCap,
             hit_time_budget: hitTimeBudget,
             elapsed_ms: Date.now() - startedAt,
             resume_cache_id: finished ? null : cacheId,
-            resume_from_page: finished ? null : page + 1,
+            resume_from_page: finished ? null : lastPageFetched + 1,
             expires_at_iso: new Date(lastHandle?.expires_at ?? Date.now()).toISOString(),
             byte_length: lastHandle?.byte_length ?? 0,
             sample: all.slice(0, 5),
@@ -242,10 +279,11 @@ export function registerScheduledOrderTools(server) {
         return errorText(
           Object.assign(new Error(err?.message ?? String(err)), {
             partial_cache_id: cacheId,
-            last_page_attempted: page,
+            last_page_fetched: lastPageFetched,
+            failed_on_page: pageInFlight,
             rows_captured: all.length,
             resume_hint:
-              "The last successful page's snapshot is durable. Retry with resume_cache_id=<partial_cache_id> and resume_from_page=<last_page_attempted> once the underlying issue is resolved.",
+              "The last successful page's snapshot is durable. Retry with resume_cache_id=<partial_cache_id> and resume_from_page=<failed_on_page> once the underlying issue is resolved.",
           }),
           statusOf(err)
         );
