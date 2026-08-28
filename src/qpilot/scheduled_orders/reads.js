@@ -68,6 +68,79 @@ export async function searchScheduledOrders({
 }
 
 /**
+ * Full-detail paginated list of scheduled orders. Uses the classic
+ * /Sites/{siteId}/ScheduledOrders endpoint (NOT the v3 lightweight variant
+ * used by searchScheduledOrders) so each item is a complete ScheduledOrderDto
+ * with top-level `customerId`, nested `customer`, and the full
+ * `scheduledOrderItems` array — the shape you need for bulk export.
+ *
+ * Response shape (per QPilot docs):
+ *   { items: ScheduledOrderDto[], totalCount: number, totalPages: number }
+ *
+ * @param {object} [params]
+ * @param {number} [params.page=1]
+ * @param {number} [params.pageSize=100] QPilot's default; capped at MAX_PAGE_LIMIT.
+ * @param {string} [params.customerId] Filter by WP user id.
+ * @param {string[]} [params.statusNames]
+ * @param {string} [params.search]
+ * @param {string[]} [params.metadataKey]
+ * @param {string[]} [params.metadataValue]
+ * @param {string} [params.scheduledOrderCreatedFromDate]
+ * @param {string} [params.scheduledOrderCreatedToDate]
+ * @param {string} [params.nextOccurrenceFromDate]
+ * @param {string} [params.nextOccurrenceToDate]
+ * @param {string} [params.customerCreatedFromDate]
+ * @param {string} [params.customerCreatedToDate]
+ * @param {boolean} [params.snoozed]
+ * @param {string} [params.orderBy]
+ * @param {"asc"|"desc"} [params.order]
+ * @returns {Promise<{items: object[], totalCount: number, totalPages: number}>}
+ */
+export async function listScheduledOrders({
+  page = 1,
+  pageSize = DEFAULT_PAGE_LIMIT,
+  customerId,
+  statusNames,
+  search,
+  metadataKey,
+  metadataValue,
+  scheduledOrderCreatedFromDate,
+  scheduledOrderCreatedToDate,
+  nextOccurrenceFromDate,
+  nextOccurrenceToDate,
+  customerCreatedFromDate,
+  customerCreatedToDate,
+  snoozed,
+  orderBy,
+  order,
+} = {}) {
+  const cappedSize = Math.min(pageSize, MAX_PAGE_LIMIT);
+  return await withRetry(() =>
+    qpilotRequest({
+      path: sitePath(`/ScheduledOrders`),
+      query: {
+        page,
+        pageSize: cappedSize,
+        customerId,
+        statusNames,
+        search,
+        metadataKey,
+        metadataValue,
+        scheduledOrderCreatedFromDate,
+        scheduledOrderCreatedToDate,
+        nextOccurrenceFromDate,
+        nextOccurrenceToDate,
+        customerCreatedFromDate,
+        customerCreatedToDate,
+        snoozed,
+        orderBy,
+        order,
+      },
+    })
+  );
+}
+
+/**
  * Fetch the QPilot-recorded change history for scheduled orders. This is
  * QPilot's own activity log — distinct from this server's local audit_log.
  *

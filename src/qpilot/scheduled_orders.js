@@ -26,6 +26,7 @@ import "./scheduled_orders/rollback.js";
 export {
   getScheduledOrderById,
   searchScheduledOrders,
+  listScheduledOrders,
   getScheduledOrdersHistory,
 } from "./scheduled_orders/reads.js";
 

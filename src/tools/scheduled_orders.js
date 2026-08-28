@@ -9,6 +9,7 @@ import { z } from "zod";
 import {
   getScheduledOrderById,
   searchScheduledOrders,
+  listScheduledOrders,
   getScheduledOrdersHistory,
   updateScheduledOrder,
   changeScheduledOrderStatus,
@@ -99,12 +100,16 @@ export function registerScheduledOrderTools(server) {
 
   server.tool(
     "sync_all_scheduled_orders",
-    "Paginate through EVERY scheduled order matching the given filters, stitch the pages into one result set, and stash it in result_cache under a single handle. One call in, one cache_id out — use query_cache to slice. Prefer this over looping search_scheduled_orders(cache:true) manually. Ephemeral: the cache row expires per RESULT_CACHE_TTL_MS.",
+    "Paginate through EVERY scheduled order matching the given filters, stitch the pages into one result set, and stash it in result_cache under a single handle. Uses the FULL-DETAIL /Sites/{siteId}/ScheduledOrders endpoint (NOT the v3 lightweight one) so each row is a complete ScheduledOrderDto — top-level customerId, nested customer, scheduledOrderItems with productId/quantity, payment method, etc. Persists per page: crash/cancel mid-loop leaves the partial snapshot recoverable via the returned cache_id. Ephemeral: cache row expires per RESULT_CACHE_TTL_MS.",
     {
       statuses: z
         .array(z.string())
         .optional()
         .describe("Status filter (e.g. ['Active']). Omit for all statuses. Multiple values combine with OR."),
+      customer_id: z
+        .string()
+        .optional()
+        .describe("Filter to a single customer's scheduled orders (WP user id)."),
       search: z
         .string()
         .optional()
@@ -117,8 +122,8 @@ export function registerScheduledOrderTools(server) {
         .min(1)
         .max(200)
         .optional()
-        .default(200)
-        .describe("QPilot v3 max is 200; keep the default unless you have a reason."),
+        .default(100)
+        .describe("QPilot default is 100 for this endpoint; kept as our default. Max 200."),
       max_pages: z
         .number()
         .int()
@@ -126,20 +131,21 @@ export function registerScheduledOrderTools(server) {
         .max(2000)
         .optional()
         .default(1000)
-        .describe("Safety cap so a runaway loop can't hammer QPilot. 1000 * 200 = 200k orders."),
+        .describe("Safety cap so a runaway loop can't hammer QPilot. 1000 * 100 = 100k orders."),
     },
-    async ({ statuses, search, order_by, order, page_size, max_pages }) => {
+    async ({ statuses, customer_id, search, order_by, order, page_size, max_pages }) => {
       const cacheId = newRollingCacheId();
-      const sourceArgs = { statuses, search, order_by, order, page_size };
+      const sourceArgs = { statuses, customer_id, search, order_by, order, page_size };
       const all = [];
       let page = 1;
       let lastBatchSize = 0;
       let lastHandle = null;
       try {
         while (page <= max_pages) {
-          const raw = await searchScheduledOrders({
+          const raw = await listScheduledOrders({
             page,
             pageSize: page_size,
+            customerId: customer_id,
             statusNames: statuses,
             search,
             orderBy: order_by,
