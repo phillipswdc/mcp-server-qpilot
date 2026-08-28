@@ -26,6 +26,7 @@ import {
   newRollingCacheId,
   upsertRollingResultSet,
 } from "../qpilot/_cache.js";
+import { getCache } from "../db/queries/result_cache.js";
 import { annotateProcessingErrorCode } from "../qpilot/processing_failure_codes.js";
 import { jsonText, errorText, statusOf, normalizeListResponse } from "./_shared.js";
 
@@ -100,7 +101,7 @@ export function registerScheduledOrderTools(server) {
 
   server.tool(
     "sync_all_scheduled_orders",
-    "Paginate through EVERY scheduled order matching the given filters, stitch the pages into one result set, and stash it in result_cache under a single handle. Uses the FULL-DETAIL /Sites/{siteId}/ScheduledOrders endpoint (NOT the v3 lightweight one) so each row is a complete ScheduledOrderDto — top-level customerId, nested customer, scheduledOrderItems with productId/quantity, payment method, etc. Persists per page: crash/cancel mid-loop leaves the partial snapshot recoverable via the returned cache_id. Ephemeral: cache row expires per RESULT_CACHE_TTL_MS.",
+    "Time-boxed bulk-sync of scheduled orders. Uses the FULL-DETAIL /Sites/{siteId}/ScheduledOrders endpoint so each row is a complete ScheduledOrderDto — top-level customerId, nested customer, scheduledOrderItems with productId/quantity, etc. Persists per page into result_cache under one stable handle. If the run exceeds `max_seconds` it stops cleanly and returns `finished: false` with a `resume_cache_id` and `resume_from_page` — call the tool again with those two params to continue. When `finished: true`, the cache_id holds every matching row.",
     {
       statuses: z
         .array(z.string())
@@ -110,10 +111,7 @@ export function registerScheduledOrderTools(server) {
         .string()
         .optional()
         .describe("Filter to a single customer's scheduled orders (WP user id)."),
-      search: z
-        .string()
-        .optional()
-        .describe("Free-text search across QPilot's default searchable fields."),
+      search: z.string().optional().describe("Free-text search across QPilot's default searchable fields."),
       order_by: z.string().optional().describe("Sort field. QPilot default is 'NextOccurrenceUtc'."),
       order: z.enum(["asc", "desc"]).optional(),
       page_size: z
@@ -131,15 +129,60 @@ export function registerScheduledOrderTools(server) {
         .max(2000)
         .optional()
         .default(1000)
-        .describe("Safety cap so a runaway loop can't hammer QPilot. 1000 * 100 = 100k orders."),
+        .describe("Absolute safety cap across ALL calls of a resumed run."),
+      max_seconds: z
+        .number()
+        .min(5)
+        .max(60)
+        .optional()
+        .default(25)
+        .describe("Hard time budget per call. When exceeded the tool returns finished:false with a resume handle; call again with resume_cache_id + resume_from_page to continue."),
+      resume_cache_id: z
+        .string()
+        .optional()
+        .describe("Provided by a prior call's response when finished:false. Continues writing into the same cache row."),
+      resume_from_page: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Provided by a prior call's response when finished:false. First page to fetch on this call."),
     },
-    async ({ statuses, customer_id, search, order_by, order, page_size, max_pages }) => {
-      const cacheId = newRollingCacheId();
+    async ({
+      statuses,
+      customer_id,
+      search,
+      order_by,
+      order,
+      page_size,
+      max_pages,
+      max_seconds,
+      resume_cache_id,
+      resume_from_page,
+    }) => {
+      const startedAt = Date.now();
+      const deadline = startedAt + max_seconds * 1000;
+      const cacheId = resume_cache_id ?? newRollingCacheId();
       const sourceArgs = { statuses, customer_id, search, order_by, order, page_size };
-      const all = [];
-      let page = 1;
+
+      // If resuming, seed `all` from the prior cache row so upserts stay cumulative.
+      let all = [];
+      if (resume_cache_id) {
+        const prior = getCache(resume_cache_id);
+        if (prior && prior.payload) {
+          try {
+            const parsed = JSON.parse(prior.payload);
+            if (Array.isArray(parsed)) all = parsed;
+          } catch {
+            // Corrupt row — treat as empty, tool call will overwrite it.
+          }
+        }
+      }
+
+      let page = resume_from_page ?? 1;
       let lastBatchSize = 0;
       let lastHandle = null;
+      let hitTimeBudget = false;
       try {
         while (page <= max_pages) {
           const raw = await listScheduledOrders({
@@ -155,8 +198,6 @@ export function registerScheduledOrderTools(server) {
           const batch = normalized.results ?? [];
           all.push(...batch);
           lastBatchSize = batch.length;
-          // Persist after every page so a crash/cancel mid-loop still leaves
-          // the accumulated snapshot recoverable via query_cache(cache_id).
           lastHandle = upsertRollingResultSet({
             cacheId,
             toolName: "sync_all_scheduled_orders",
@@ -164,34 +205,47 @@ export function registerScheduledOrderTools(server) {
             objectType: "scheduled_orders",
             results: all,
           });
-          if (lastBatchSize < page_size) break;
+          if (lastBatchSize < page_size) break; // natural end
           page += 1;
+          if (Date.now() >= deadline) {
+            hitTimeBudget = true;
+            break;
+          }
         }
+        const naturallyDone = lastBatchSize < page_size;
         const hitPageCap = page >= max_pages && lastBatchSize === page_size;
+        const finished = naturallyDone || hitPageCap;
         return jsonText(
           {
             cache_id: cacheId,
             cache_type: "result_set",
             object_type: "scheduled_orders",
             total: all.length,
-            pages_fetched: page,
+            pages_fetched_this_call: page - (resume_from_page ?? 1) + (lastBatchSize > 0 ? 1 : 0),
+            last_page_fetched: page,
+            finished,
             hit_page_cap: hitPageCap,
-            expires_at_iso: new Date(lastHandle.expires_at).toISOString(),
-            byte_length: lastHandle.byte_length,
+            hit_time_budget: hitTimeBudget,
+            elapsed_ms: Date.now() - startedAt,
+            resume_cache_id: finished ? null : cacheId,
+            resume_from_page: finished ? null : page + 1,
+            expires_at_iso: new Date(lastHandle?.expires_at ?? Date.now()).toISOString(),
+            byte_length: lastHandle?.byte_length ?? 0,
             sample: all.slice(0, 5),
-            next_steps:
-              "Use query_cache(cache_id) to filter/sort/paginate.",
+            next_steps: finished
+              ? "Use query_cache(cache_id) to filter/sort/paginate."
+              : "Call sync_all_scheduled_orders again with resume_cache_id and resume_from_page to continue.",
           },
           { toolName: "sync_all_scheduled_orders" }
         );
       } catch (err) {
-        // Even on partial failure, the last successful upsert is already
-        // durable — return the handle so the caller can pick up the pieces.
         return errorText(
           Object.assign(new Error(err?.message ?? String(err)), {
             partial_cache_id: cacheId,
-            pages_completed: page - 1,
+            last_page_attempted: page,
             rows_captured: all.length,
+            resume_hint:
+              "The last successful page's snapshot is durable. Retry with resume_cache_id=<partial_cache_id> and resume_from_page=<last_page_attempted> once the underlying issue is resolved.",
           }),
           statusOf(err)
         );
