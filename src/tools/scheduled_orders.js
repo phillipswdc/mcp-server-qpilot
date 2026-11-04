@@ -139,8 +139,9 @@ export function registerScheduledOrderTools(server) {
         .min(1)
         .max(200)
         .optional()
-        .default(100)
-        .describe("QPilot default is 100 for this endpoint; kept as our default. Max 200."),
+        .describe(
+          "QPilot default is 100 for this endpoint; the tool applies 100 when omitted AND there is no stored value on a resume. Max 200. Must stay consistent across every call of a resumed run."
+        ),
       max_pages: z
         .number()
         .int()
@@ -253,8 +254,12 @@ export function registerScheduledOrderTools(server) {
         if (search === undefined) search = priorArgs.search;
         if (order_by === undefined) order_by = priorArgs.order_by;
         if (order === undefined) order = priorArgs.order;
-        if (priorArgs.page_size !== undefined) page_size = priorArgs.page_size;
+        if (page_size === undefined) page_size = priorArgs.page_size;
       }
+
+      // Fallback default — applied AFTER resume hydration so a prior
+      // nondefault page_size survives a resume call that omits the field.
+      if (page_size === undefined) page_size = 100;
 
       const sourceArgs = { statuses, customer_id, search, order_by, order, page_size };
 
@@ -316,18 +321,28 @@ export function registerScheduledOrderTools(server) {
             break;
           }
         }
+        // Did the loop run at all? If firstPage > max_pages the for-loop
+        // skips every iteration, lastBatchSize stays 0 and the short-batch
+        // disjunct below would falsely claim naturallyDone. A zero-page
+        // call also can't rely on reachedTotalPages (we never fetched the
+        // envelope that carries it).
+        const pagesFetchedThisCall =
+          lastPageFetched >= firstPage ? lastPageFetched - firstPage + 1 : 0;
         const naturallyDone =
-          (totalPagesFromServer != null && lastPageFetched >= totalPagesFromServer) ||
-          lastBatchSize < page_size;
+          pagesFetchedThisCall > 0 &&
+          ((totalPagesFromServer != null && lastPageFetched >= totalPagesFromServer) ||
+            lastBatchSize < page_size);
+        // A resume whose first page is already past max_pages exits the
+        // loop with zero iterations — that's a page-cap hit, not completion.
         const hitPageCap =
-          !hitTimeBudget && !naturallyDone && lastPageFetched >= max_pages;
+          !hitTimeBudget && !naturallyDone && firstPage > max_pages
+            ? true
+            : !hitTimeBudget && !naturallyDone && lastPageFetched >= max_pages;
         // Only a natural exit counts as finished. Hitting the page cap or the
         // time budget leaves data behind — the response must keep the resume
         // handle populated so the caller can continue (with a larger
         // max_pages / another slice of time).
         const finished = naturallyDone;
-        const pagesFetchedThisCall =
-          lastPageFetched >= firstPage ? lastPageFetched - firstPage + 1 : 0;
         const pagesRemaining =
           finished || totalPagesFromServer == null
             ? null
