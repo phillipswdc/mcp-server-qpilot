@@ -5,6 +5,10 @@
  */
 import { sitePath } from "../client.js";
 
+export function collectionPath() {
+  return sitePath(`/ScheduledOrders`);
+}
+
 export function orderPath(id) {
   return sitePath(`/ScheduledOrders/${encodeURIComponent(id)}`);
 }

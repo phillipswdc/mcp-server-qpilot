@@ -76,7 +76,7 @@ playbook.
 
 ---
 
-## Tools (34)
+## Tools (36)
 
 Read tools that surface `processingErrorCode` (single SO, processing-cycle reads, etc.) are auto-enriched with `processingErrorCodeName` and `processingErrorCodeMeaning` so you don't have to memorize the numeric codes. See [`docs/qpilot-error-codes.md`](docs/qpilot-error-codes.md) for the full Layer 1 catalog (11 codes) and links to per-gateway codes when a payment fails.
 
@@ -86,6 +86,7 @@ Read tools that surface `processingErrorCode` (single SO, processing-cycle reads
 | `get_scheduled_order` | Fetch one SO (auto-annotates `processingErrorCode`) | — |
 | `search_scheduled_orders` | v3 list (page, statuses, search, orderBy) | — |
 | `get_scheduled_order_history` | QPilot's `/ScheduledOrdersHistory` (date range) | — |
+| `create_scheduled_order` | Create a new SO via POST /ScheduledOrders. **Smoke test pending** — see TODO in source | ✅ rollback-able (soft-delete) |
 | `update_scheduled_order` | Partial update via merge-body PUT | ✅ rollback-able |
 | `change_scheduled_order_status` | Active ⇄ Paused only | ✅ rollback-able |
 | `snooze_scheduled_order` | Snooze until a future UTC date (auto-reactivates) | ✅ rollback-able |
@@ -100,6 +101,7 @@ Read tools that surface `processingErrorCode` (single SO, processing-cycle reads
 | Tool | Purpose | Audited |
 |---|---|---|
 | `get_scheduled_order_item` | Fetch one item | — |
+| `add_scheduled_order_item` | Add one item to an existing SO via POST /ScheduledOrderItems. **Smoke test pending** — see TODO in source | ✅ rollback-able (hard-delete) |
 | `update_scheduled_order_item` | Update quantity / price / etc. | ✅ rollback-able |
 | `delete_scheduled_order_item` | Hard-delete | ✅ rollback-able |
 

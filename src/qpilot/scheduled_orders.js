@@ -31,6 +31,7 @@ export {
 } from "./scheduled_orders/reads.js";
 
 export {
+  createScheduledOrder,
   updateScheduledOrder,
   changeScheduledOrderStatus,
   snoozeScheduledOrder,

@@ -80,3 +80,24 @@ export const PAYMENT_METHOD_AUDIT_KEYS = [
   "status",
   "isActive",
 ];
+
+/**
+ * Properties captured on create audits. Must be a superset of every key the
+ * POST body can set for a newly-created scheduled order — rollback uses the
+ * `id` from new_values to target the soft-delete, but the rest give a
+ * forensic record of what shape the created order had.
+ */
+export const CREATE_AUDIT_KEYS = [
+  "id",
+  "customerId",
+  "paymentMethodId",
+  "frequency",
+  "frequencyType",
+  "nextOccurrenceUtc",
+  "status",
+  "isActive",
+  "name",
+  "cycles",
+  "currencyIso",
+  "note",
+];

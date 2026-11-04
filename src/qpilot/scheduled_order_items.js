@@ -3,6 +3,7 @@
  *
  * Reads (no audit): getById.
  * Mutations (audited + rollback):
+ *   - add: POST — rollback DELETEs the new id.
  *   - update: PUT — rollback writes captured old_values back.
  *   - deleteItem: DELETE — this IS a real delete in QPilot (unlike scheduled
  *     orders), so the rollback handler re-creates the item from old_values
@@ -17,12 +18,72 @@ import { registerRollbackHandler } from "./audit.js";
 const OBJECT_TYPE = "scheduled_order_items";
 const COLLECTION_PATH = "/ScheduledOrderItems";
 
+const ADD_AUDIT_KEYS = [
+  "id",
+  "scheduledOrderId",
+  "productId",
+  "quantity",
+  "price",
+  "salePrice",
+  "originalSalePrice",
+  "cycles",
+  "minCycles",
+  "maxCycles",
+  "metadata",
+];
+
 /**
  * Fetch a single scheduled order item by id.
  * @param {string|number} id
  */
 export async function getScheduledOrderItemById(id) {
   return await withRetry(() => qpilotRequest({ path: itemPath(id) }));
+}
+
+/**
+ * Add a single item to an existing scheduled order via POST
+ * /Sites/{siteId}/ScheduledOrderItems.
+ *
+ * QPilot's endpoint takes a batch shape ({ scheduledOrderId, scheduledOrderItems: [...] })
+ * and returns an array of created items. We wrap the caller's single item
+ * into that envelope and unwrap the array on the way out so the audit row
+ * captures ONE item — matching the (object_type, object_id) model the
+ * audit/rollback layer expects.
+ *
+ * TODO(2026-11-04): no end-to-end smoke test yet — needs a safe test SO +
+ * productId pair on site 1113. Verify response shape, confirm the DELETE
+ * rollback succeeds, and record any QPilot 4xx conditions the docs don't
+ * enumerate (e.g. SO status preconditions, lock-window interactions).
+ *
+ * @param {object} params
+ * @param {string|number} params.scheduledOrderId
+ * @param {object} params.item QPilot-shaped item body (camelCase)
+ */
+export async function addScheduledOrderItem({ scheduledOrderId, item }) {
+  const body = {
+    scheduledOrderId,
+    scheduledOrderItems: [item],
+  };
+
+  return await auditedMutation({
+    toolName: "add_scheduled_order_item",
+    objectType: OBJECT_TYPE,
+    operation: "create",
+    args: { scheduledOrderId, item },
+    fetchExisting: async () => null,
+    perform: async () => {
+      const created = await withRetry(() =>
+        qpilotRequest({
+          path: sitePath(COLLECTION_PATH),
+          method: "POST",
+          body,
+        })
+      );
+      if (Array.isArray(created)) return created[0] ?? null;
+      return created;
+    },
+    filterCapturedKeys: ADD_AUDIT_KEYS,
+  });
 }
 
 /**
@@ -254,6 +315,59 @@ function stripServerManagedFields(obj) {
   return out;
 }
 
+/**
+ * Add rollback: DELETE the newly-created item by the id recorded in
+ * new_values. Drift check uses updatedUtc only — if the item has been
+ * edited since creation, the caller is explicitly discarding those edits
+ * by rolling back the create, which is the whole point.
+ */
+async function rollbackItemAdd({ original, options, auditedMutation, markRolledBack }) {
+  const id = original.object_id;
+  if (!id) {
+    throw new Error(
+      `Audit row ${original.id} has no object_id — cannot target a delete for rollback`
+    );
+  }
+
+  const path = itemPath(id);
+
+  if (!options?.force) {
+    const current = await withRetry(() => qpilotRequest({ path }));
+    const expectedLm = original.last_modified_at;
+    const currentLm = pickLastModifiedAt(current);
+    if (
+      Number.isFinite(expectedLm) &&
+      Number.isFinite(currentLm) &&
+      expectedLm !== currentLm
+    ) {
+      throw new Error(
+        `Drift detected on audit_id ${original.id}: item updatedUtc has advanced from ${new Date(expectedLm).toISOString()} (recorded) to ${new Date(currentLm).toISOString()} (live). Something modified the item after this mutation. Pass force: true to override.`
+      );
+    }
+  }
+
+  const { audit_id } = await auditedMutation({
+    toolName: "rollback_change",
+    objectType: OBJECT_TYPE,
+    operation: "delete",
+    args: { rolled_back_audit_id: Number(original.id) },
+    fetchExisting: () => withRetry(() => qpilotRequest({ path })),
+    perform: async () => {
+      await withRetry(() => qpilotRequest({ path, method: "DELETE" }));
+      return null;
+    },
+    rollbackAuditId: Number(original.id),
+  });
+
+  markRolledBack(Number(original.id), audit_id);
+  return {
+    original_audit_id: Number(original.id),
+    rollback_audit_id: audit_id,
+    deleted_item_id: id,
+  };
+}
+
+registerRollbackHandler(OBJECT_TYPE, "create", rollbackItemAdd);
 registerRollbackHandler(OBJECT_TYPE, "update", rollbackItemUpdate);
 registerRollbackHandler(OBJECT_TYPE, "delete", rollbackItemDelete);
 

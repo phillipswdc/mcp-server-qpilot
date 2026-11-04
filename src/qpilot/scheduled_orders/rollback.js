@@ -264,4 +264,58 @@ export async function assertNoDrift({ original, options, keys, fetchCurrent }) {
   );
 }
 
+/**
+ * Rollback for `create_scheduled_order`. Inverse is a soft-delete via
+ * DELETE /ScheduledOrders/{id} — the same call the (intentionally
+ * non-audited) `delete_scheduled_order` tool uses. The SO itself is
+ * recoverable from the QPilot UI or via `safe_activate_scheduled_order`
+ * with `allow_deleted: true`, so this is reversible from the operator side.
+ *
+ * Drift guard: updatedUtc check only. We don't track per-field drift on a
+ * create rollback because the "expected" shape is just "the thing we
+ * created" and any edit since then is still legitimately rollback-able
+ * (deleting the record also discards those edits — which the operator may
+ * or may not want). `force: true` skips the updatedUtc check.
+ */
+async function rollbackCreate({ original, options, auditedMutation, markRolledBack }) {
+  const id = original.object_id;
+  if (!id) {
+    throw new Error(
+      `Audit row ${original.id} has no object_id — cannot target a delete for rollback`
+    );
+  }
+
+  const path = orderPath(id);
+
+  await assertNoDrift({
+    original,
+    options,
+    keys: [],
+    fetchCurrent: () => qpilotRequest({ path }),
+  });
+
+  const { audit_id } = await auditedMutation({
+    toolName: "rollback_change",
+    objectType: OBJECT_TYPE,
+    operation: "delete",
+    args: { rolled_back_audit_id: Number(original.id) },
+    fetchExisting: () => withRetry(() => qpilotRequest({ path })),
+    perform: async () => {
+      await withRetry(() => qpilotRequest({ path, method: "DELETE" }));
+      return null;
+    },
+    rollbackAuditId: Number(original.id),
+  });
+
+  markRolledBack(Number(original.id), audit_id);
+  return {
+    original_audit_id: Number(original.id),
+    rollback_audit_id: audit_id,
+    deleted_scheduled_order_id: id,
+    note:
+      "Soft-deleted via QPilot DELETE. Recoverable through the QPilot UI or via safe_activate_scheduled_order with allow_deleted: true.",
+  };
+}
+
 registerRollbackHandler(OBJECT_TYPE, "update", rollbackUpdate);
+registerRollbackHandler(OBJECT_TYPE, "create", rollbackCreate);

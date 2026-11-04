@@ -20,8 +20,10 @@ import {
   FREQUENCY_AUDIT_KEYS,
   RETRY_AUDIT_KEYS,
   PAYMENT_METHOD_AUDIT_KEYS,
+  CREATE_AUDIT_KEYS,
 } from "./constants.js";
 import {
+  collectionPath,
   orderPath,
   statusPath,
   snoozePath,
@@ -391,4 +393,45 @@ export async function deleteScheduledOrder(id) {
   return await withRetry(() =>
     qpilotRequest({ path: orderPath(id), method: "DELETE" })
   );
+}
+
+/**
+ * Create a new scheduled order via POST /Sites/{siteId}/ScheduledOrders.
+ *
+ * QPilot's PostPutScheduledOrderDto requires `frequency` (1-365) and
+ * `frequencyType` (Days/Weeks/Months/DayOfTheWeek/DayOfTheMonth). Everything
+ * else is optional on the wire, but in practice you'll want `customerId` (or
+ * a `customer` sub-object to create one inline), `paymentMethodId`, and
+ * `scheduledOrderItems` — an SO with no items won't process anything.
+ *
+ * The tool layer validates the common shape; `properties` is a passthrough
+ * for the long tail (shipping address, metadata, coupons, note, etc.) so we
+ * don't fork the schema every time QPilot adds a field.
+ *
+ * TODO(2026-11-04): no end-to-end smoke test yet — needs a safe test
+ * customer + product on site 1113. Verify response shape, confirm that
+ * rollback's soft-delete cleans up child items too, and record QPilot's
+ * actual 4xx conditions (the docs page doesn't enumerate them).
+ *
+ * @param {object} params
+ * @param {object} params.body QPilot-shaped body (camelCase)
+ */
+export async function createScheduledOrder({ body }) {
+  return await auditedMutation({
+    toolName: "create_scheduled_order",
+    objectType: OBJECT_TYPE,
+    operation: "create",
+    args: { body },
+    fetchExisting: async () => null,
+    perform: async () => {
+      return await withRetry(() =>
+        qpilotRequest({
+          path: collectionPath(),
+          method: "POST",
+          body,
+        })
+      );
+    },
+    filterCapturedKeys: CREATE_AUDIT_KEYS,
+  });
 }

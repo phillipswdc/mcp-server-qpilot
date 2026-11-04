@@ -11,6 +11,7 @@ import {
   searchScheduledOrders,
   listScheduledOrders,
   getScheduledOrdersHistory,
+  createScheduledOrder,
   updateScheduledOrder,
   changeScheduledOrderStatus,
   snoozeScheduledOrder,
@@ -444,6 +445,145 @@ export function registerScheduledOrderTools(server) {
           objectType: "scheduled_orders_history",
         });
         return jsonText(out, { toolName: "get_scheduled_order_history" });
+      } catch (err) {
+        return errorText(err, statusOf(err));
+      }
+    }
+  );
+
+  server.tool(
+    "create_scheduled_order",
+    "Create a new scheduled order via POST /Sites/{siteId}/ScheduledOrders. Required by QPilot: `frequency` (1-365) and `frequency_type`. Operationally you'll also want `customer_id` (QPilot allows an inline `customer` sub-object via `extra_properties` to create a new customer at the same time, but that isn't the common path), `payment_method_id`, and at least one entry in `items` — an SO with no items won't process anything. Returns the created ScheduledOrderDto (same shape as get_scheduled_order). Audited and rollback-capable: `rollback_change` soft-deletes the SO (QPilot's own DELETE semantics), which is recoverable through the QPilot UI or via `safe_activate_scheduled_order` with `allow_deleted: true`. CONSTRAINTS the docs do not enumerate but you may hit live: payment_method_id must exist on the site and belong to the customer; product_ids on items must be known to QPilot; status defaults to Active if omitted. END-TO-END SMOKE TEST PENDING — needs a safe test customer + product on site 1113.",
+    {
+      customer_id: z
+        .string()
+        .optional()
+        .describe(
+          "Existing customer id (the string `id` from get_customer, e.g. \"4284\"). Required unless you pass an inline `customer` sub-object via extra_properties. Not the numeric `customerId` int64."
+        ),
+      frequency: z
+        .number()
+        .int()
+        .min(1)
+        .max(365)
+        .describe("Recurrence interval count. QPilot requires this; integer 1-365."),
+      frequency_type: z
+        .enum(["Days", "Weeks", "Months", "DayOfTheWeek", "DayOfTheMonth"])
+        .describe("Recurrence unit. QPilot requires this."),
+      payment_method_id: z
+        .number()
+        .int()
+        .optional()
+        .describe(
+          "QPilot's int64 payment method id. Discover via get_customer_payment_methods. Omit only if you intend to add one later; QPilot will accept the SO without one but it cannot process."
+        ),
+      next_occurrence_utc: z
+        .string()
+        .optional()
+        .describe(
+          "ISO UTC timestamp for the first processing date. QPilot computes one if omitted. Example: '2026-12-01T00:00:00.000Z'."
+        ),
+      status: z
+        .enum(["Active", "Paused"])
+        .optional()
+        .describe(
+          "Initial status. QPilot defaults to Active if omitted. Only Active/Paused are settable — Failed/Deleted/Completed are derived."
+        ),
+      name: z
+        .string()
+        .max(128)
+        .optional()
+        .describe("Optional human-readable label for the SO (max 128 chars)."),
+      cycles: z
+        .number()
+        .int()
+        .optional()
+        .describe("Optional total occurrences cap. Omit for open-ended."),
+      currency_iso: z
+        .string()
+        .max(3)
+        .optional()
+        .describe("3-letter ISO currency code (e.g. 'USD'). Omit to inherit the site default."),
+      note: z
+        .string()
+        .optional()
+        .describe("Optional free-text note stored on the SO."),
+      items: z
+        .array(
+          z.object({
+            product_id: z.string().describe("QPilot product id."),
+            quantity: z.number().int().min(1).describe("Quantity to order each cycle."),
+            price: z.number().optional().describe("Optional per-unit price override."),
+            sale_price: z.number().optional().describe("Optional per-unit sale price override."),
+            cycles: z
+              .number()
+              .int()
+              .optional()
+              .describe("Optional per-item cycle limit (independent of the SO-level cycles)."),
+            metadata: z
+              .record(z.string(), z.unknown())
+              .optional()
+              .describe("Optional metadata object attached to the line item."),
+          })
+        )
+        .optional()
+        .describe(
+          "Initial line items. QPilot accepts creating an SO with no items but it won't process anything — add at least one here or follow up with add_scheduled_order_item."
+        ),
+      extra_properties: z
+        .record(z.string(), z.unknown())
+        .optional()
+        .describe(
+          "Passthrough for the long tail of PostPutScheduledOrderDto fields (shipping address: firstName/lastName/street1/street2/city/state/postcode/country; phoneNumber; company; coupons; metadata; clientContractId; customer sub-object; etc.). Keys must be camelCase — they are merged into the POST body verbatim and not validated here."
+        ),
+    },
+    async ({
+      customer_id,
+      frequency,
+      frequency_type,
+      payment_method_id,
+      next_occurrence_utc,
+      status,
+      name,
+      cycles,
+      currency_iso,
+      note,
+      items,
+      extra_properties,
+    }) => {
+      try {
+        const body = {
+          frequency,
+          frequencyType: frequency_type,
+          ...(customer_id !== undefined ? { customerId: customer_id } : {}),
+          ...(payment_method_id !== undefined ? { paymentMethodId: payment_method_id } : {}),
+          ...(next_occurrence_utc !== undefined ? { nextOccurrenceUtc: next_occurrence_utc } : {}),
+          ...(status !== undefined ? { status } : {}),
+          ...(name !== undefined ? { name } : {}),
+          ...(cycles !== undefined ? { cycles } : {}),
+          ...(currency_iso !== undefined ? { currencyIso: currency_iso } : {}),
+          ...(note !== undefined ? { note } : {}),
+          ...(items !== undefined
+            ? {
+                scheduledOrderItems: items.map((it) => ({
+                  productId: it.product_id,
+                  quantity: it.quantity,
+                  ...(it.price !== undefined ? { price: it.price } : {}),
+                  ...(it.sale_price !== undefined ? { salePrice: it.sale_price } : {}),
+                  ...(it.cycles !== undefined ? { cycles: it.cycles } : {}),
+                  ...(it.metadata !== undefined ? { metadata: it.metadata } : {}),
+                })),
+              }
+            : {}),
+          ...(extra_properties ?? {}),
+        };
+
+        const out = await createScheduledOrder({ body });
+        return jsonText({
+          audit_id: out.audit_id,
+          scheduled_order_id: out.result?.id ?? null,
+          result: out.result,
+        });
       } catch (err) {
         return errorText(err, statusOf(err));
       }
