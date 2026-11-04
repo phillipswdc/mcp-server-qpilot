@@ -30,6 +30,25 @@ import { getCache } from "../db/queries/result_cache.js";
 import { annotateProcessingErrorCode } from "../qpilot/processing_failure_codes.js";
 import { jsonText, errorText, statusOf, normalizeListResponse } from "./_shared.js";
 
+/**
+ * Loose equality for resume-filter values. Arrays compare member-wise and
+ * order-insensitively (statuses is the only array in RESUME_FILTER_KEYS);
+ * everything else uses == so string/number coercion matches QPilot's wire shape.
+ * Exported for tests — not part of the module's public API.
+ */
+export function sameFilterValue(a, b) {
+  if (a === b) return true;
+  if (a == null && b == null) return true;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    const sa = [...a].map(String).sort();
+    const sb = [...b].map(String).sort();
+    return sa.every((v, i) => v === sb[i]);
+  }
+  return String(a) === String(b);
+}
+
 /** @param {import("@modelcontextprotocol/sdk/server/mcp.js").McpServer} server */
 export function registerScheduledOrderTools(server) {
   server.tool(
@@ -163,13 +182,33 @@ export function registerScheduledOrderTools(server) {
       const startedAt = Date.now();
       const deadline = startedAt + max_seconds * 1000;
       const cacheId = resume_cache_id ?? newRollingCacheId();
-      const sourceArgs = { statuses, customer_id, search, order_by, order, page_size };
 
-      // If resuming, seed `all` from the prior cache row so upserts stay cumulative.
+      // Filter args that must stay consistent across every call of a resumed
+      // run — changing them mid-run would mix results into the same cache row.
+      const RESUME_FILTER_KEYS = [
+        "statuses",
+        "customer_id",
+        "search",
+        "order_by",
+        "order",
+        "page_size",
+      ];
+
       let all = [];
       if (resume_cache_id) {
+        // Missing or expired checkpoint: refuse rather than silently starting
+        // from the requested page with an empty array (prior pages would be
+        // lost and the "finished" response would hide the gap).
         const prior = getCache(resume_cache_id);
-        if (prior && prior.payload) {
+        if (!prior) {
+          return errorText(
+            new Error(
+              `Resume handle ${resume_cache_id} is missing or expired. Start a new run (omit resume_cache_id) to re-fetch from page 1.`
+            ),
+            "resume-unavailable"
+          );
+        }
+        if (prior.payload) {
           try {
             const parsed = JSON.parse(prior.payload);
             if (Array.isArray(parsed)) all = parsed;
@@ -177,7 +216,47 @@ export function registerScheduledOrderTools(server) {
             // Corrupt row — treat as empty, tool call will overwrite it.
           }
         }
+
+        // Hydrate the filter args from the cached source_args so a
+        // "resume_cache_id + resume_from_page" call doesn't silently reset
+        // filters to undefined and page_size to the schema default.
+        const priorArgs = prior.source_args ?? {};
+        const callerSupplied = {
+          statuses,
+          customer_id,
+          search,
+          order_by,
+          order,
+          page_size,
+        };
+        for (const k of RESUME_FILTER_KEYS) {
+          const caller = callerSupplied[k];
+          const stored = priorArgs[k];
+          // Caller supplied a value AND it disagrees with the stored one:
+          // refuse rather than silently producing mixed results.
+          if (caller !== undefined && !sameFilterValue(caller, stored)) {
+            return errorText(
+              new Error(
+                `Resume filter mismatch on \`${k}\`: stored=${JSON.stringify(
+                  stored
+                )}, caller=${JSON.stringify(
+                  caller
+                )}. Call again with only resume_cache_id and resume_from_page, or omit resume_cache_id to start a fresh run with these new filters.`
+              ),
+              "resume-filter-mismatch"
+            );
+          }
+        }
+        // Apply hydrated values back to the locals the loop reads.
+        if (statuses === undefined) statuses = priorArgs.statuses;
+        if (customer_id === undefined) customer_id = priorArgs.customer_id;
+        if (search === undefined) search = priorArgs.search;
+        if (order_by === undefined) order_by = priorArgs.order_by;
+        if (order === undefined) order = priorArgs.order;
+        if (priorArgs.page_size !== undefined) page_size = priorArgs.page_size;
       }
+
+      const sourceArgs = { statuses, customer_id, search, order_by, order, page_size };
 
       // firstPage = first page number we will fetch on THIS call.
       // lastPageFetched = highest page we actually completed. Starts at
@@ -242,7 +321,11 @@ export function registerScheduledOrderTools(server) {
           lastBatchSize < page_size;
         const hitPageCap =
           !hitTimeBudget && !naturallyDone && lastPageFetched >= max_pages;
-        const finished = naturallyDone || hitPageCap;
+        // Only a natural exit counts as finished. Hitting the page cap or the
+        // time budget leaves data behind — the response must keep the resume
+        // handle populated so the caller can continue (with a larger
+        // max_pages / another slice of time).
+        const finished = naturallyDone;
         const pagesFetchedThisCall =
           lastPageFetched >= firstPage ? lastPageFetched - firstPage + 1 : 0;
         const pagesRemaining =
@@ -276,17 +359,27 @@ export function registerScheduledOrderTools(server) {
           { toolName: "sync_all_scheduled_orders" }
         );
       } catch (err) {
-        return errorText(
-          Object.assign(new Error(err?.message ?? String(err)), {
-            partial_cache_id: cacheId,
-            last_page_fetched: lastPageFetched,
-            failed_on_page: pageInFlight,
-            rows_captured: all.length,
-            resume_hint:
-              "The last successful page's snapshot is durable. Retry with resume_cache_id=<partial_cache_id> and resume_from_page=<failed_on_page> once the underlying issue is resolved.",
-          }),
-          statusOf(err)
-        );
+        // errorText() only renders err.message — assigning recovery metadata
+        // onto an Error loses it silently. Build the content string so the
+        // caller actually sees the partial cache id, the failed page, and
+        // how to resume.
+        const recovery = {
+          partial_cache_id: cacheId,
+          last_page_fetched: lastPageFetched,
+          failed_on_page: pageInFlight,
+          rows_captured: all.length,
+          resume_hint:
+            "The last successful page's snapshot is durable. Retry with resume_cache_id=<partial_cache_id> and resume_from_page=<failed_on_page> once the underlying issue is resolved.",
+        };
+        return {
+          content: [
+            {
+              type: "text",
+              text: `QPilot error (${statusOf(err) ?? "unknown"}): ${err?.message ?? String(err)}\n\n${JSON.stringify(recovery, null, 2)}`,
+            },
+          ],
+          isError: true,
+        };
       }
     }
   );
